@@ -74,7 +74,6 @@ const BLOCK_DEFINITIONS = {
       {
         field:          "band9_speaking_analysis",
         type:           "Band 9 Speaking Analysis",
-        // CHANGED: instruction no longer mentions recording
         instruction:    "Watch the IELTS Band 9 speaking video below. Take notes, identify useful vocabulary and natural phrases, observe transitions and fillers, and note interesting ways of expressing ideas. Focus on fluency, naturalness, answer expansion, and conversational rhythm. Write your analysis in the text area below.",
         videoField:     "band9_video_url",
         answerLabel:    "Your notes & analysis",
@@ -83,7 +82,6 @@ const BLOCK_DEFINITIONS = {
       {
         field:          "bourdain_listening",
         type:           "Anthony Bourdain Listening & Response",
-        // CHANGED: instruction no longer mentions recording
         instruction:    "Watch the Anthony Bourdain episode below. After watching, answer the comprehension and opinion-based questions provided. Focus on: understanding meaning in context, identifying emotional tone, learning conversational expressions, and summarising ideas naturally. Write your answers in the text area below.",
         videoField:     "bourdain_video_url",
         questionsField: "bourdain_questions",
@@ -93,7 +91,6 @@ const BLOCK_DEFINITIONS = {
       {
         field:          "video_reflection",
         type:           "Video Reflection Speaking Task",
-        // CHANGED: instruction now says write, not record
         instruction:    "Watch the video clip below. After watching, write a response of around 2 minutes of speaking length. You may cover: your opinion, interesting ideas, agreement or disagreement, emotional reactions, and personal connections. Focus on developing your ideas fully and writing naturally.",
         videoField:     "reflection_video_url",
         answerLabel:    "Your written reflection",
@@ -608,15 +605,18 @@ const Api = {
     } catch (_) { /* silent */ }
   },
 
-  async submitSpeaking({ audioBlob, sessionId, day, questionField, questionType, prepTimeMs, retryCount }) {
+  // FIX: now accepts questionContent so the backend can pass
+  // the actual exam question to GPT for accurate scoring.
+  async submitSpeaking({ audioBlob, sessionId, day, questionField, questionType, questionContent, prepTimeMs, retryCount }) {
     const form = new FormData();
-    form.append("audio",          audioBlob, "recording.webm");
-    form.append("session_id",     sessionId);
-    form.append("day",            String(day));
-    form.append("question_field", questionField);
-    form.append("question_type",  questionType || questionField);
-    form.append("prep_time_ms",   String(prepTimeMs || 0));
-    form.append("retry_count",    String(retryCount || 0));
+    form.append("audio",            audioBlob, "recording.webm");
+    form.append("session_id",       sessionId);
+    form.append("day",              String(day));
+    form.append("question_field",   questionField);
+    form.append("question_type",    questionType  || questionField);
+    form.append("question_content", questionContent || "");
+    form.append("prep_time_ms",     String(prepTimeMs  || 0));
+    form.append("retry_count",      String(retryCount  || 0));
 
     const res  = await fetch(`${API_BASE}/api/speaking/submit`, { method: "POST", body: form });
     const json = await res.json();
@@ -730,15 +730,14 @@ function YouTubeEmbed({ url }) {
 // SPEAKING TIMER COMPONENT  (Block 3 only — unchanged)
 // ─────────────────────────────────────────────────────────────
 function SpeakingTimer({ isRecording, prepSeconds }) {
-  const [prepElapsed,  setPrepElapsed]  = useState(0);
-  const [recElapsed,   setRecElapsed]   = useState(0);
+  const [prepElapsed, setPrepElapsed] = useState(0);
+  const [recElapsed,  setRecElapsed]  = useState(0);
   const mountRef    = useRef(Date.now());
   const recStartRef = useRef(null);
 
   useEffect(() => {
     const id = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - mountRef.current) / 1000);
-      setPrepElapsed(elapsed);
+      setPrepElapsed(Math.floor((Date.now() - mountRef.current) / 1000));
       if (recStartRef.current) {
         setRecElapsed(Math.floor((Date.now() - recStartRef.current) / 1000));
       }
@@ -756,9 +755,7 @@ function SpeakingTimer({ isRecording, prepSeconds }) {
   }, [isRecording]);
 
   function fmt(s) {
-    const m   = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+    return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   }
 
   if (isRecording) {
@@ -786,27 +783,7 @@ function SpeakingTimer({ isRecording, prepSeconds }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// AUDIO RECORDER COMPONENT  (Block 3 only)
-//
-// FIX — microphone permission was silently failing because
-// MediaRecorder was constructed with a hard-coded mimeType
-// ("audio/webm") that is not supported on Safari / iOS.
-// When the constructor throws, the error is caught before the
-// browser's permission prompt ever appears, so the user sees
-// "Microphone access denied" without being asked at all.
-//
-// Fix applied:
-//   1. getSupportedMimeType() probes the browser for the best
-//      available codec in priority order and falls back to ""
-//      (browser default) if none match — this is always safe.
-//   2. navigator.mediaDevices.getUserMedia is called FIRST with
-//      a simple { audio: true } constraint so the browser shows
-//      the permission prompt unconditionally.
-//   3. Only after the stream is granted do we construct
-//      MediaRecorder with the detected mimeType, so no codec
-//      mismatch can prevent the prompt from appearing.
-//   4. Permission-denied errors are caught separately and show
-//      a clear, actionable message.
+// getSupportedMimeType — probes browser for best audio codec
 // ─────────────────────────────────────────────────────────────
 function getSupportedMimeType() {
   const candidates = [
@@ -815,7 +792,7 @@ function getSupportedMimeType() {
     "audio/ogg;codecs=opus",
     "audio/ogg",
     "audio/mp4",
-    "",   // browser default — always works as final fallback
+    "",
   ];
   for (const type of candidates) {
     if (type === "" || MediaRecorder.isTypeSupported(type)) return type;
@@ -823,55 +800,72 @@ function getSupportedMimeType() {
   return "";
 }
 
-function AudioRecorder({ sessionId, day, questionField, questionType, onRecordStart, prepTimeMs }) {
-  const [isRecording,  setIsRecording]  = useState(false);
-  const [audioUrl,     setAudioUrl]     = useState(null);
-  const [audioBlob,    setAudioBlob]    = useState(null);
-  const [retryCount,   setRetryCount]   = useState(0);
-  const [submitState,  setSubmitState]  = useState("idle"); // idle|pending|success|error
-  const [scores,       setScores]       = useState(null);
-  const [transcript,   setTranscript]   = useState(null);
-  const [errorMsg,     setErrorMsg]     = useState("");
+// ─────────────────────────────────────────────────────────────
+// AUDIO RECORDER COMPONENT  (Block 3 only)
+//
+// FIX 1 — recorder state now fully resets between questions.
+//   AudioRecorder receives a `key` prop equal to `current`
+//   (the question index) from QuestionPage. When `current`
+//   changes, React unmounts the old instance and mounts a
+//   completely fresh one with clean state. This is the correct
+//   React pattern for "reset a stateful child on prop change".
+//
+// FIX 2 — questionContent is passed through to Api.submitSpeaking
+//   so the backend can include the actual exam question in the
+//   GPT scoring prompt for accurate evaluation.
+// ─────────────────────────────────────────────────────────────
+function AudioRecorder({ sessionId, day, questionField, questionType, questionContent, onRecordStart, prepTimeMs }) {
+  const [isRecording, setIsRecording] = useState(false);
+  const [audioUrl,    setAudioUrl]    = useState(null);
+  const [audioBlob,   setAudioBlob]   = useState(null);
+  const [retryCount,  setRetryCount]  = useState(0);
+  const [submitState, setSubmitState] = useState("idle"); // idle|pending|success|error
+  const [scores,      setScores]      = useState(null);
+  const [transcript,  setTranscript]  = useState(null);
+  const [errorMsg,    setErrorMsg]    = useState("");
 
   const mediaRef  = useRef(null);
   const chunksRef = useRef([]);
 
+  // Clean up object URL on unmount
+  useEffect(() => {
+    return () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      // Stop any live stream if component unmounts mid-recording
+      if (mediaRef.current && mediaRef.current.state !== "inactive") {
+        mediaRef.current.stop();
+      }
+    };
+  }, [audioUrl]);
+
   const startRecording = useCallback(async () => {
     setErrorMsg("");
 
-    // ── Step 1: request mic permission first ──────────────
-    // This is the call that triggers the browser's permission
-    // prompt. We do this before touching MediaRecorder so that
-    // codec detection cannot silently block the prompt.
+    // Step 1: Request mic permission — this triggers the browser prompt
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
-      // NotAllowedError  → user denied or dismissed the prompt
-      // NotFoundError    → no microphone hardware found
       if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
         setErrorMsg(
-          "Microphone access was denied. Please click the camera/mic icon in your browser's address bar, allow microphone access, and try again."
+          "Microphone access was denied. Please click the mic icon in your browser's address bar, allow access, and try again."
         );
       } else if (err.name === "NotFoundError") {
-        setErrorMsg("No microphone was found on this device. Please connect a microphone and try again.");
+        setErrorMsg("No microphone found on this device. Please connect a microphone and try again.");
       } else {
         setErrorMsg(`Could not access microphone: ${err.message}`);
       }
-      return; // do not proceed
+      return;
     }
 
-    // ── Step 2: detect best mimeType AFTER stream is granted ─
+    // Step 2: Detect best codec after permission granted
     const mimeType = getSupportedMimeType();
 
-    // ── Step 3: construct MediaRecorder safely ────────────
+    // Step 3: Construct MediaRecorder safely
     let mr;
     try {
-      mr = mimeType
-        ? new MediaRecorder(stream, { mimeType })
-        : new MediaRecorder(stream);
-    } catch (err) {
-      // Codec truly not supported — fall back to browser default
+      mr = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    } catch (_) {
       try {
         mr = new MediaRecorder(stream);
       } catch (fallbackErr) {
@@ -929,12 +923,14 @@ function AudioRecorder({ sessionId, day, questionField, questionType, onRecordSt
     setSubmitState("pending");
     setErrorMsg("");
     try {
+      // FIX 2: pass questionContent so GPT knows what was asked
       const result = await Api.submitSpeaking({
         audioBlob,
         sessionId,
         day,
         questionField,
         questionType,
+        questionContent,
         prepTimeMs,
         retryCount,
       });
@@ -947,9 +943,7 @@ function AudioRecorder({ sessionId, day, questionField, questionType, onRecordSt
       setErrorMsg(err.message || "Submission failed. Please try again.");
       Analytics.track("speaking_submit_error", { day, questionField, error: err.message });
     }
-  }, [audioBlob, sessionId, day, questionField, questionType, prepTimeMs, retryCount]);
-
-  useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }, [audioUrl]);
+  }, [audioBlob, sessionId, day, questionField, questionType, questionContent, prepTimeMs, retryCount]);
 
   return (
     <div className={`recorder-wrap${audioUrl ? " has-recording" : ""}`}>
@@ -982,7 +976,11 @@ function AudioRecorder({ sessionId, day, questionField, questionType, onRecordSt
               onClick={handleSubmit}
               disabled={submitState === "pending" || submitState === "success"}
             >
-              {submitState === "pending" ? "Submitting…" : submitState === "success" ? "✓ Submitted" : "Submit Answer"}
+              {submitState === "pending"
+                ? "Submitting…"
+                : submitState === "success"
+                ? "✓ Submitted"
+                : "Submit Answer"}
             </button>
           </>
         )}
@@ -1078,7 +1076,7 @@ function ScoresCard({ scores, transcript }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PAGE 1 — DAY NAVIGATION  (unchanged)
+// PAGE 1 — DAY NAVIGATION
 // ─────────────────────────────────────────────────────────────
 function DayPage({ onSelectDay }) {
   return (
@@ -1125,7 +1123,7 @@ function DayPage({ onSelectDay }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PAGE 2 — BLOCK NAVIGATION  (unchanged)
+// PAGE 2 — BLOCK NAVIGATION
 // ─────────────────────────────────────────────────────────────
 function BlockPage({ day, onSelectBlock, onBack }) {
   function getStatus(num) {
@@ -1198,20 +1196,20 @@ function BlockPage({ day, onSelectBlock, onBack }) {
 function QuestionPage({ day, block, onBack, onComplete }) {
   const def = BLOCK_DEFINITIONS[block];
 
-  const [dayContent,   setDayContent]   = useState(null);
-  const [loading,      setLoading]      = useState(true);
-  const [error,        setError]        = useState(false);
-  const [current,      setCurrent]      = useState(0);
-  const [answers,      setAnswers]      = useState({});     // Block 1 + Block 2 text answers
-  const [done,         setDone]         = useState(false);
-  const [isRecording,  setIsRecording]  = useState(false);  // passed to SpeakingTimer
+  const [dayContent,  setDayContent]  = useState(null);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState(false);
+  const [current,     setCurrent]     = useState(0);
+  const [answers,     setAnswers]     = useState({});    // Block 1 + Block 2 text answers
+  const [done,        setDone]        = useState(false);
+  const [isRecording, setIsRecording] = useState(false); // passed to SpeakingTimer
 
-  const blockStartRef  = useRef(Date.now());
-  const qStartRef      = useRef(Date.now());
-  const fetchCount     = useRef(0);
-  const pageMountRef   = useRef(Date.now());
+  const blockStartRef = useRef(Date.now());
+  const qStartRef     = useRef(Date.now());
+  const fetchCount    = useRef(0);
+  const pageMountRef  = useRef(Date.now());
 
-  // ── Fetch ───────────────────────────────────────────────
+  // ── Fetch ────────────────────────────────────────────────
   const fetchContent = () => {
     setLoading(true);
     setError(false);
@@ -1241,21 +1239,20 @@ function QuestionPage({ day, block, onBack, onComplete }) {
   };
 
   useEffect(fetchContent, [day, block]);
+
+  // Reset per-question state when moving to a new question
   useEffect(() => {
     qStartRef.current    = Date.now();
     pageMountRef.current = Date.now();
     setIsRecording(false);
   }, [current]);
 
-  // ── Next handler ────────────────────────────────────────
+  // ── Next / Prev ──────────────────────────────────────────
   const handleNext = async () => {
     const qDef        = def.questions[current];
     const timeSpentMs = Date.now() - qStartRef.current;
     const answerText  = answers[current] ?? "";
 
-    // Block 1: save text answer.
-    // Block 2: save text answer (CHANGED — was skipping Block 2).
-    // Block 3: answers saved via AudioRecorder / submitSpeaking.
     if (block === 1 || block === 2) {
       await Api.saveAnswer({
         session_id:     Analytics.sessionId,
@@ -1290,7 +1287,7 @@ function QuestionPage({ day, block, onBack, onComplete }) {
     }
   };
 
-  // ── Breadcrumbs ─────────────────────────────────────────
+  // ── Breadcrumbs ──────────────────────────────────────────
   const crumbs = [
     { label: "Days",       onClick: onBack },
     { label: `Day ${day}`, onClick: onBack },
@@ -1333,7 +1330,7 @@ function QuestionPage({ day, block, onBack, onComplete }) {
     );
   }
 
-  const qDef    = def.questions[current];
+  const qDef   = def.questions[current];
   const content = dayContent[qDef.field] ?? null;
 
   return (
@@ -1352,16 +1349,13 @@ function QuestionPage({ day, block, onBack, onComplete }) {
         <div className="q-type-tag">{qDef.type}</div>
         <div className="q-instruction">{qDef.instruction}</div>
 
-        {/* ── BLOCK 2: Video + typed answer ────────────────
-            CHANGED: AudioRecorder replaced with textarea.
-            Everything else (embed, Bourdain questions panel) unchanged. */}
+        {/* ── BLOCK 2: Video + typed answer ─────────────── */}
         {block === 2 && (
           <>
             <div className="q-divider" aria-hidden />
             <div className="q-task-label">Watch the video</div>
             <YouTubeEmbed url={qDef.videoField ? dayContent[qDef.videoField] : null} />
 
-            {/* Bourdain comprehension questions from DB */}
             {qDef.questionsField && dayContent[qDef.questionsField] && (
               <div className="bourdain-qs">
                 <div className="bourdain-qs-label">📋 Comprehension Questions</div>
@@ -1369,7 +1363,6 @@ function QuestionPage({ day, block, onBack, onComplete }) {
               </div>
             )}
 
-            {/* Typed answer — replaces AudioRecorder */}
             <div className="answer-wrap">
               <div className="answer-label">{qDef.answerLabel || "Your written response"}</div>
               <textarea
@@ -1385,8 +1378,13 @@ function QuestionPage({ day, block, onBack, onComplete }) {
           </>
         )}
 
-        {/* ── BLOCK 3: Speaking simulation — audio recorder ─
-            Unchanged except AudioRecorder itself is fixed above. */}
+        {/* ── BLOCK 3: Speaking simulation ──────────────────
+            FIX 1: key={current} forces AudioRecorder to fully
+            unmount and remount as a clean instance each time
+            the user advances to the next question. Without this,
+            React reuses the same component instance and all state
+            (audioUrl, audioBlob, scores, submitState) from Part 1
+            bleeds into Part 2 and Part 3. */}
         {block === 3 && (
           <>
             <div className="q-divider" aria-hidden />
@@ -1408,17 +1406,19 @@ function QuestionPage({ day, block, onBack, onComplete }) {
             )}
 
             <AudioRecorder
+              key={current}
               sessionId={Analytics.sessionId}
               day={day}
               questionField={qDef.field}
               questionType={qDef.type}
+              questionContent={content || ""}
               prepTimeMs={Date.now() - pageMountRef.current}
               onRecordStart={() => setIsRecording(true)}
             />
           </>
         )}
 
-        {/* ── BLOCK 1: Text questions — unchanged ──────────── */}
+        {/* ── BLOCK 1: Text questions — unchanged ─────────── */}
         {block === 1 && (
           <>
             {content ? (
@@ -1466,7 +1466,7 @@ function QuestionPage({ day, block, onBack, onComplete }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// APP ROOT  (unchanged)
+// APP ROOT
 // ─────────────────────────────────────────────────────────────
 export default function App() {
   const [page,  setPage]  = useState("days");

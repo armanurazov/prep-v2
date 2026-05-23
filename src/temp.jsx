@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // ─────────────────────────────────────────────────────────────
 const API_BASE        = "https://bilimtapbackend-production.up.railway.app";
 const FALLBACK_VIDEO  = "https://www.youtube.com/watch?v=JENPic35uWY";
-const SUPABASE_BUCKET = "speaking-recordings"; // for public URL construction if needed
+const SUPABASE_BUCKET = "speaking-recordings";
 
 // ─────────────────────────────────────────────────────────────
 // YOUTUBE HELPERS
@@ -72,23 +72,32 @@ const BLOCK_DEFINITIONS = {
     desc:  "Exposure to natural English, listening comprehension, vocabulary acquisition, speaking spontaneity.",
     questions: [
       {
-        field:       "band9_speaking_analysis",
-        type:        "Band 9 Speaking Analysis",
-        instruction: "Watch the IELTS Band 9 speaking video below. Take notes, identify useful vocabulary and natural phrases, observe transitions and fillers, and note interesting ways of expressing ideas. Focus on fluency, naturalness, answer expansion, and conversational rhythm. Record your spoken analysis.",
-        videoField:  "band9_video_url",  // DB column with the YouTube link
+        field:          "band9_speaking_analysis",
+        type:           "Band 9 Speaking Analysis",
+        // CHANGED: instruction no longer mentions recording
+        instruction:    "Watch the IELTS Band 9 speaking video below. Take notes, identify useful vocabulary and natural phrases, observe transitions and fillers, and note interesting ways of expressing ideas. Focus on fluency, naturalness, answer expansion, and conversational rhythm. Write your analysis in the text area below.",
+        videoField:     "band9_video_url",
+        answerLabel:    "Your notes & analysis",
+        answerPlaceholder: "Note down useful vocabulary, natural phrases, transitions, fillers, and techniques the speaker uses to expand their answers…",
       },
       {
-        field:       "bourdain_listening",
-        type:        "Anthony Bourdain Listening & Response",
-        instruction: "Watch the Anthony Bourdain episode below. After watching, answer the comprehension and opinion-based questions provided. Focus on: understanding meaning in context, identifying emotional tone, learning conversational expressions, and summarising ideas naturally. Record your spoken response.",
-        videoField:  "bourdain_video_url",   // DB column with the YouTube link
-        questionsField: "bourdain_questions", // DB column with questions text
+        field:          "bourdain_listening",
+        type:           "Anthony Bourdain Listening & Response",
+        // CHANGED: instruction no longer mentions recording
+        instruction:    "Watch the Anthony Bourdain episode below. After watching, answer the comprehension and opinion-based questions provided. Focus on: understanding meaning in context, identifying emotional tone, learning conversational expressions, and summarising ideas naturally. Write your answers in the text area below.",
+        videoField:     "bourdain_video_url",
+        questionsField: "bourdain_questions",
+        answerLabel:    "Your written responses",
+        answerPlaceholder: "Answer each question below in complete sentences…",
       },
       {
-        field:       "video_reflection",
-        type:        "Video Reflection Speaking Task",
-        instruction: "Watch the video clip below. After watching, record a 2-minute spoken response. You may cover: your opinion, interesting ideas, agreement or disagreement, emotional reactions, and personal connections. Focus on continuous speaking, natural pacing, and idea expansion. Do not memorise a response.",
-        videoField:  "reflection_video_url", // DB column with the YouTube link
+        field:          "video_reflection",
+        type:           "Video Reflection Speaking Task",
+        // CHANGED: instruction now says write, not record
+        instruction:    "Watch the video clip below. After watching, write a response of around 2 minutes of speaking length. You may cover: your opinion, interesting ideas, agreement or disagreement, emotional reactions, and personal connections. Focus on developing your ideas fully and writing naturally.",
+        videoField:     "reflection_video_url",
+        answerLabel:    "Your written reflection",
+        answerPlaceholder: "Share your opinion and reaction — what stood out, do you agree or disagree, how did it make you feel, any personal connection…",
       },
     ],
   },
@@ -346,7 +355,7 @@ const styles = `
   }
   .bourdain-qs-text { font-size: 0.93rem; color: var(--text); line-height: 1.75; white-space: pre-wrap; }
 
-  /* ── Answer area (Block 1 text) ──────────────────────── */
+  /* ── Answer area (Block 1 + Block 2 text) ────────────── */
   .answer-wrap  { margin-top: 22px; }
   .answer-label { font-size: 0.76rem; font-weight: 600; color: var(--gray-600); margin-bottom: 8px; letter-spacing: 0.02em; }
   .answer-textarea {
@@ -368,6 +377,7 @@ const styles = `
   .timer-wrap.prep { background: var(--orange-light); border-color: var(--orange); }
   .timer-wrap.recording { background: var(--red-light); border-color: var(--red); animation: pulse-border 1.2s ease infinite; }
   @keyframes pulse-border { 0%,100% { border-color: var(--red); } 50% { border-color: #f87171; } }
+
   .timer-label { font-size: 0.78rem; font-weight: 600; color: var(--gray-800); flex: 1; }
   .timer-clock {
     font-size: 1.35rem; font-weight: 700; font-variant-numeric: tabular-nums;
@@ -513,7 +523,7 @@ const styles = `
 `;
 
 // ─────────────────────────────────────────────────────────────
-// ANALYTICS  →  POST /api/sessions  &  POST /api/events
+// ANALYTICS
 // ─────────────────────────────────────────────────────────────
 const Analytics = (() => {
   const sessionId    = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -598,7 +608,6 @@ const Api = {
     } catch (_) { /* silent */ }
   },
 
-  /** Upload audio + metadata; returns { ok, transcript, scores, storage_path } */
   async submitSpeaking({ audioBlob, sessionId, day, questionField, questionType, prepTimeMs, retryCount }) {
     const form = new FormData();
     form.append("audio",          audioBlob, "recording.webm");
@@ -609,10 +618,7 @@ const Api = {
     form.append("prep_time_ms",   String(prepTimeMs || 0));
     form.append("retry_count",    String(retryCount || 0));
 
-    const res = await fetch(`${API_BASE}/api/speaking/submit`, {
-      method: "POST",
-      body:   form,
-    });
+    const res  = await fetch(`${API_BASE}/api/speaking/submit`, { method: "POST", body: form });
     const json = await res.json();
     if (!res.ok && res.status !== 207) throw new Error(json.error || "Upload failed");
     return json;
@@ -721,13 +727,12 @@ function YouTubeEmbed({ url }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// SPEAKING TIMER COMPONENT
-// Tracks prep time (from mount) and recording duration.
+// SPEAKING TIMER COMPONENT  (Block 3 only — unchanged)
 // ─────────────────────────────────────────────────────────────
 function SpeakingTimer({ isRecording, prepSeconds }) {
-  const [prepElapsed,  setPrepElapsed]  = useState(0);   // seconds since page load
-  const [recElapsed,   setRecElapsed]   = useState(0);   // seconds since recording started
-  const mountRef   = useRef(Date.now());
+  const [prepElapsed,  setPrepElapsed]  = useState(0);
+  const [recElapsed,   setRecElapsed]   = useState(0);
+  const mountRef    = useRef(Date.now());
   const recStartRef = useRef(null);
 
   useEffect(() => {
@@ -751,7 +756,7 @@ function SpeakingTimer({ isRecording, prepSeconds }) {
   }, [isRecording]);
 
   function fmt(s) {
-    const m = Math.floor(s / 60);
+    const m   = Math.floor(s / 60);
     const sec = s % 60;
     return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
   }
@@ -781,9 +786,43 @@ function SpeakingTimer({ isRecording, prepSeconds }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// AUDIO RECORDER COMPONENT
-// Handles recording, preview, and submission to /api/speaking/submit
+// AUDIO RECORDER COMPONENT  (Block 3 only)
+//
+// FIX — microphone permission was silently failing because
+// MediaRecorder was constructed with a hard-coded mimeType
+// ("audio/webm") that is not supported on Safari / iOS.
+// When the constructor throws, the error is caught before the
+// browser's permission prompt ever appears, so the user sees
+// "Microphone access denied" without being asked at all.
+//
+// Fix applied:
+//   1. getSupportedMimeType() probes the browser for the best
+//      available codec in priority order and falls back to ""
+//      (browser default) if none match — this is always safe.
+//   2. navigator.mediaDevices.getUserMedia is called FIRST with
+//      a simple { audio: true } constraint so the browser shows
+//      the permission prompt unconditionally.
+//   3. Only after the stream is granted do we construct
+//      MediaRecorder with the detected mimeType, so no codec
+//      mismatch can prevent the prompt from appearing.
+//   4. Permission-denied errors are caught separately and show
+//      a clear, actionable message.
 // ─────────────────────────────────────────────────────────────
+function getSupportedMimeType() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/ogg",
+    "audio/mp4",
+    "",   // browser default — always works as final fallback
+  ];
+  for (const type of candidates) {
+    if (type === "" || MediaRecorder.isTypeSupported(type)) return type;
+  }
+  return "";
+}
+
 function AudioRecorder({ sessionId, day, questionField, questionType, onRecordStart, prepTimeMs }) {
   const [isRecording,  setIsRecording]  = useState(false);
   const [audioUrl,     setAudioUrl]     = useState(null);
@@ -794,39 +833,77 @@ function AudioRecorder({ sessionId, day, questionField, questionType, onRecordSt
   const [transcript,   setTranscript]   = useState(null);
   const [errorMsg,     setErrorMsg]     = useState("");
 
-  const mediaRef    = useRef(null);
-  const chunksRef   = useRef([]);
+  const mediaRef  = useRef(null);
+  const chunksRef = useRef([]);
 
   const startRecording = useCallback(async () => {
+    setErrorMsg("");
+
+    // ── Step 1: request mic permission first ──────────────
+    // This is the call that triggers the browser's permission
+    // prompt. We do this before touching MediaRecorder so that
+    // codec detection cannot silently block the prompt.
+    let stream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream, { mimeType: "audio/webm" });
-      chunksRef.current = [];
-
-      mr.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-
-      mr.onstop = () => {
-        stream.getTracks().forEach(t => t.stop());
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-        const url  = URL.createObjectURL(blob);
-        setAudioBlob(blob);
-        setAudioUrl(url);
-        setSubmitState("idle");
-        setScores(null);
-        setTranscript(null);
-      };
-
-      mr.start(1000); // collect in 1-second chunks
-      mediaRef.current = mr;
-      setIsRecording(true);
-      setAudioUrl(null);
-      setAudioBlob(null);
-      if (onRecordStart) onRecordStart();
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
-      setErrorMsg("Microphone access denied. Please allow microphone and try again.");
+      // NotAllowedError  → user denied or dismissed the prompt
+      // NotFoundError    → no microphone hardware found
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        setErrorMsg(
+          "Microphone access was denied. Please click the camera/mic icon in your browser's address bar, allow microphone access, and try again."
+        );
+      } else if (err.name === "NotFoundError") {
+        setErrorMsg("No microphone was found on this device. Please connect a microphone and try again.");
+      } else {
+        setErrorMsg(`Could not access microphone: ${err.message}`);
+      }
+      return; // do not proceed
     }
+
+    // ── Step 2: detect best mimeType AFTER stream is granted ─
+    const mimeType = getSupportedMimeType();
+
+    // ── Step 3: construct MediaRecorder safely ────────────
+    let mr;
+    try {
+      mr = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+    } catch (err) {
+      // Codec truly not supported — fall back to browser default
+      try {
+        mr = new MediaRecorder(stream);
+      } catch (fallbackErr) {
+        stream.getTracks().forEach(t => t.stop());
+        setErrorMsg("Your browser does not support audio recording. Please try Chrome or Firefox.");
+        return;
+      }
+    }
+
+    chunksRef.current = [];
+
+    mr.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data);
+    };
+
+    mr.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(chunksRef.current, { type: mr.mimeType || "audio/webm" });
+      const url  = URL.createObjectURL(blob);
+      setAudioBlob(blob);
+      setAudioUrl(url);
+      setSubmitState("idle");
+      setScores(null);
+      setTranscript(null);
+    };
+
+    mr.start(1000);
+    mediaRef.current = mr;
+    setIsRecording(true);
+    setAudioUrl(null);
+    setAudioBlob(null);
+    if (onRecordStart) onRecordStart();
   }, [onRecordStart]);
 
   const stopRecording = useCallback(() => {
@@ -843,6 +920,7 @@ function AudioRecorder({ sessionId, day, questionField, questionType, onRecordSt
     setSubmitState("idle");
     setScores(null);
     setTranscript(null);
+    setErrorMsg("");
     startRecording();
   }, [startRecording]);
 
@@ -871,7 +949,6 @@ function AudioRecorder({ sessionId, day, questionField, questionType, onRecordSt
     }
   }, [audioBlob, sessionId, day, questionField, questionType, prepTimeMs, retryCount]);
 
-  // Clean up object URLs
   useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }, [audioUrl]);
 
   return (
@@ -1001,7 +1078,7 @@ function ScoresCard({ scores, transcript }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PAGE 1 — DAY NAVIGATION
+// PAGE 1 — DAY NAVIGATION  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function DayPage({ onSelectDay }) {
   return (
@@ -1048,7 +1125,7 @@ function DayPage({ onSelectDay }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PAGE 2 — BLOCK NAVIGATION
+// PAGE 2 — BLOCK NAVIGATION  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function BlockPage({ day, onSelectBlock, onBack }) {
   function getStatus(num) {
@@ -1121,20 +1198,20 @@ function BlockPage({ day, onSelectBlock, onBack }) {
 function QuestionPage({ day, block, onBack, onComplete }) {
   const def = BLOCK_DEFINITIONS[block];
 
-  const [dayContent, setDayContent] = useState(null);
-  const [loading,    setLoading]    = useState(true);
-  const [error,      setError]      = useState(false);
-  const [current,    setCurrent]    = useState(0);
-  const [answers,    setAnswers]    = useState({});     // Block 1 text answers
-  const [done,       setDone]       = useState(false);
-  const [isRecording, setIsRecording] = useState(false); // passed down for timer
+  const [dayContent,   setDayContent]   = useState(null);
+  const [loading,      setLoading]      = useState(true);
+  const [error,        setError]        = useState(false);
+  const [current,      setCurrent]      = useState(0);
+  const [answers,      setAnswers]      = useState({});     // Block 1 + Block 2 text answers
+  const [done,         setDone]         = useState(false);
+  const [isRecording,  setIsRecording]  = useState(false);  // passed to SpeakingTimer
 
-  const blockStartRef   = useRef(Date.now());
-  const qStartRef       = useRef(Date.now());
-  const fetchCount      = useRef(0);
-  const pageMountRef    = useRef(Date.now()); // for prep time calc
+  const blockStartRef  = useRef(Date.now());
+  const qStartRef      = useRef(Date.now());
+  const fetchCount     = useRef(0);
+  const pageMountRef   = useRef(Date.now());
 
-  // ── Fetch ──────────────────────────────────────────────
+  // ── Fetch ───────────────────────────────────────────────
   const fetchContent = () => {
     setLoading(true);
     setError(false);
@@ -1166,20 +1243,22 @@ function QuestionPage({ day, block, onBack, onComplete }) {
   useEffect(fetchContent, [day, block]);
   useEffect(() => {
     qStartRef.current    = Date.now();
-    pageMountRef.current = Date.now(); // reset prep timer when question changes
+    pageMountRef.current = Date.now();
     setIsRecording(false);
   }, [current]);
 
-  // ── Handlers ───────────────────────────────────────────
+  // ── Next handler ────────────────────────────────────────
   const handleNext = async () => {
     const qDef        = def.questions[current];
     const timeSpentMs = Date.now() - qStartRef.current;
     const answerText  = answers[current] ?? "";
 
-    // For Block 1, save text answer. Blocks 2 & 3 save via AudioRecorder.
-    if (block === 1) {
+    // Block 1: save text answer.
+    // Block 2: save text answer (CHANGED — was skipping Block 2).
+    // Block 3: answers saved via AudioRecorder / submitSpeaking.
+    if (block === 1 || block === 2) {
       await Api.saveAnswer({
-        session_id:    Analytics.sessionId,
+        session_id:     Analytics.sessionId,
         day,
         block,
         question_field: qDef.field,
@@ -1221,7 +1300,6 @@ function QuestionPage({ day, block, onBack, onComplete }) {
   if (loading) return <main className="main"><Breadcrumb items={crumbs} /><SkeletonLoader /></main>;
   if (error || !dayContent) return <main className="main"><Breadcrumb items={crumbs} /><Fallback onRetry={fetchContent} /></main>;
 
-  // ── Completion screen ───────────────────────────────────
   if (done) {
     return (
       <main className="main">
@@ -1236,7 +1314,6 @@ function QuestionPage({ day, block, onBack, onComplete }) {
               : `Amazing work — you've completed all blocks for Day ${day}! 🏆`}
           </p>
           <div className="complete-actions">
-            {/* Two buttons: next block OR back to all blocks */}
             {block < 3 && (
               <button className="btn btn-primary" onClick={onComplete}>
                 Continue to Block {block + 1} →
@@ -1256,7 +1333,6 @@ function QuestionPage({ day, block, onBack, onComplete }) {
     );
   }
 
-  // ── Active question ────────────────────────────────────
   const qDef    = def.questions[current];
   const content = dayContent[qDef.field] ?? null;
 
@@ -1276,14 +1352,16 @@ function QuestionPage({ day, block, onBack, onComplete }) {
         <div className="q-type-tag">{qDef.type}</div>
         <div className="q-instruction">{qDef.instruction}</div>
 
-        {/* ── BLOCK 2: Video questions ─────────────────── */}
+        {/* ── BLOCK 2: Video + typed answer ────────────────
+            CHANGED: AudioRecorder replaced with textarea.
+            Everything else (embed, Bourdain questions panel) unchanged. */}
         {block === 2 && (
           <>
             <div className="q-divider" aria-hidden />
             <div className="q-task-label">Watch the video</div>
             <YouTubeEmbed url={qDef.videoField ? dayContent[qDef.videoField] : null} />
 
-            {/* Bourdain questions from DB */}
+            {/* Bourdain comprehension questions from DB */}
             {qDef.questionsField && dayContent[qDef.questionsField] && (
               <div className="bourdain-qs">
                 <div className="bourdain-qs-label">📋 Comprehension Questions</div>
@@ -1291,30 +1369,33 @@ function QuestionPage({ day, block, onBack, onComplete }) {
               </div>
             )}
 
-            {/* Audio recorder for Block 2 */}
-            <AudioRecorder
-              sessionId={Analytics.sessionId}
-              day={day}
-              questionField={qDef.field}
-              questionType={qDef.type}
-              prepTimeMs={0}
-              onRecordStart={() => setIsRecording(true)}
-            />
+            {/* Typed answer — replaces AudioRecorder */}
+            <div className="answer-wrap">
+              <div className="answer-label">{qDef.answerLabel || "Your written response"}</div>
+              <textarea
+                className="answer-textarea"
+                placeholder={qDef.answerPlaceholder || "Write your response here…"}
+                value={answers[current] ?? ""}
+                onChange={(e) =>
+                  setAnswers((prev) => ({ ...prev, [current]: e.target.value }))
+                }
+                aria-label={`Answer for ${qDef.type}`}
+              />
+            </div>
           </>
         )}
 
-        {/* ── BLOCK 3: Speaking simulation ─────────────── */}
+        {/* ── BLOCK 3: Speaking simulation — audio recorder ─
+            Unchanged except AudioRecorder itself is fixed above. */}
         {block === 3 && (
           <>
             <div className="q-divider" aria-hidden />
 
-            {/* Speaking timer */}
             <SpeakingTimer
               isRecording={isRecording}
               prepSeconds={qDef.prepSeconds || 30}
             />
 
-            {/* Task content (cue card / questions from DB) */}
             {content ? (
               <>
                 <div className="q-task-label">Today's Task</div>
@@ -1326,7 +1407,6 @@ function QuestionPage({ day, block, onBack, onComplete }) {
               </div>
             )}
 
-            {/* Audio recorder — no text area for Block 3 */}
             <AudioRecorder
               sessionId={Analytics.sessionId}
               day={day}
@@ -1338,7 +1418,7 @@ function QuestionPage({ day, block, onBack, onComplete }) {
           </>
         )}
 
-        {/* ── BLOCK 1: Text questions (unchanged) ──────── */}
+        {/* ── BLOCK 1: Text questions — unchanged ──────────── */}
         {block === 1 && (
           <>
             {content ? (
@@ -1386,7 +1466,7 @@ function QuestionPage({ day, block, onBack, onComplete }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// APP ROOT
+// APP ROOT  (unchanged)
 // ─────────────────────────────────────────────────────────────
 export default function App() {
   const [page,  setPage]  = useState("days");
