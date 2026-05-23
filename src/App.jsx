@@ -1,34 +1,21 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 
 // ─────────────────────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────────────────────
-const API_BASE        = "https://bilimtapbackend-production.up.railway.app";
-const FALLBACK_VIDEO  = "https://www.youtube.com/watch?v=JENPic35uWY";
-const SUPABASE_BUCKET = "speaking-recordings"; // for public URL construction if needed
-
-// ─────────────────────────────────────────────────────────────
-// YOUTUBE HELPERS
-// ─────────────────────────────────────────────────────────────
-function extractYouTubeId(url) {
-  if (!url) return null;
-  try {
-    const u = new URL(url);
-    if (u.hostname === "youtu.be") return u.pathname.slice(1).split("?")[0];
-    return u.searchParams.get("v") || null;
-  } catch {
-    const m = url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
-    return m ? m[1] : null;
-  }
-}
-
-function youtubeEmbedUrl(url) {
-  const id = extractYouTubeId(url || FALLBACK_VIDEO) || extractYouTubeId(FALLBACK_VIDEO);
-  return `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1`;
-}
+const API_BASE = "https://bilimtapbackend-production.up.railway.app";
 
 // ─────────────────────────────────────────────────────────────
 // STATIC QUESTION DEFINITIONS
+// Instructions never change. Only `content` (task text) comes
+// from the DB. `field` maps to the DB column name.
+//
+// Block 2 uses a special `variant` key to control rendering:
+//   "band9"     → note-taking prompts + single textarea
+//   "bourdain"  → questions listed below video link, one textarea each
+//   "reflection"→ open textarea for thoughts / feelings
+//
+// Block 3 uses `part` to control the speaking timer UI.
 // ─────────────────────────────────────────────────────────────
 const BLOCK_DEFINITIONS = {
   1: {
@@ -67,31 +54,47 @@ const BLOCK_DEFINITIONS = {
       },
     ],
   },
+
   2: {
     title: "Input, Analysis & Response",
     desc:  "Exposure to natural English, listening comprehension, vocabulary acquisition, speaking spontaneity.",
     questions: [
       {
-        field:       "band9_speaking_analysis",
-        type:        "Band 9 Speaking Analysis",
-        instruction: "Watch the IELTS Band 9 speaking video below. Take notes, identify useful vocabulary and natural phrases, observe transitions and fillers, and note interesting ways of expressing ideas. Focus on fluency, naturalness, answer expansion, and conversational rhythm. Record your spoken analysis.",
-        videoField:  "band9_video_url",  // DB column with the YouTube link
+        field:    "band9_speaking_analysis",
+        type:     "Band 9 Speaking Analysis",
+        variant:  "band9",
+        // Instruction is shown as a header — prompts are rendered separately
+        instruction: "Watch the IELTS Band 9 speaking video linked in today's task. While watching, take notes and write your analysis below using the prompts provided.",
+        // These prompts are rendered as labelled textareas — answer is stored as one JSON string
+        prompts: [
+          { key: "vocab",       label: "Useful vocabulary & collocations",          placeholder: "List words or phrases worth noting…" },
+          { key: "phrases",     label: "Natural phrases & transitions",              placeholder: "Write down any transitions, fillers, or expressions…" },
+          { key: "expansion",   label: "How does the speaker expand their answers?", placeholder: "Describe techniques they use to develop ideas…" },
+          { key: "improvement", label: "What would you borrow for your own speaking?", placeholder: "Note anything you want to try in your own answers…" },
+        ],
       },
       {
-        field:       "bourdain_listening",
-        type:        "Anthony Bourdain Listening & Response",
-        instruction: "Watch the Anthony Bourdain episode below. After watching, answer the comprehension and opinion-based questions provided. Focus on: understanding meaning in context, identifying emotional tone, learning conversational expressions, and summarising ideas naturally. Record your spoken response.",
-        videoField:  "bourdain_video_url",   // DB column with the YouTube link
-        questionsField: "bourdain_questions", // DB column with questions text
+        field:    "bourdain_listening",
+        type:     "Anthony Bourdain Listening & Response",
+        variant:  "bourdain",
+        instruction: "Watch the Anthony Bourdain episode linked in today's task. Then answer each question below in complete sentences.",
+        // Each question gets its own textarea — stored as one JSON string keyed by index
+        questions: [
+          "What location or culture did this episode focus on? Describe it briefly.",
+          "What expressions or phrases stood out to you? Why?",
+          "What was the emotional tone of the segment? How did it make you feel?",
+          "What did you learn or find most interesting?",
+        ],
       },
       {
-        field:       "video_reflection",
-        type:        "Video Reflection Speaking Task",
-        instruction: "Watch the video clip below. After watching, record a 2-minute spoken response. You may cover: your opinion, interesting ideas, agreement or disagreement, emotional reactions, and personal connections. Focus on continuous speaking, natural pacing, and idea expansion. Do not memorise a response.",
-        videoField:  "reflection_video_url", // DB column with the YouTube link
+        field:    "video_reflection",
+        type:     "Video Reflection",
+        variant:  "reflection",
+        instruction: "Watch the video linked in today's task. Afterwards, share your honest reaction below. There is no right or wrong answer — write freely about your opinion, how the video made you feel, whether you agree or disagree with the ideas, and any personal connection it brought up.",
       },
     ],
   },
+
   3: {
     title: "IELTS Speaking Simulation",
     desc:  "Full exam conditions — Part 1, Part 2, and Part 3 discussion questions.",
@@ -99,20 +102,21 @@ const BLOCK_DEFINITIONS = {
       {
         field:       "speaking_part1",
         type:        "IELTS Speaking — Part 1",
-        instruction: "Answer the Part 1 questions below exactly as you would in the real IELTS exam. Aim for 2–3 natural sentences per answer. Do not aim for perfect grammar — prioritise clear and confident communication.",
-        prepSeconds: 15,
+        part:        1,
+        instruction: "Answer the Part 1 questions below as you would in the real IELTS exam. Write 2–3 natural sentences per question. Prioritise clear, confident communication over perfect grammar.",
       },
       {
         field:       "speaking_part2",
         type:        "IELTS Speaking — Part 2",
-        instruction: "Read the cue card below. You have 1 minute to prepare your thoughts, then speak for 1–2 minutes covering all bullet points. Focus on fluency, coherence, and idea development.",
-        prepSeconds: 60,
+        part:        2,
+        // No preparation countdown — just a speaking timer that counts up
+        instruction: "Read the cue card below. Take as much preparation time as you need, then start the timer and write your spoken response as if speaking for 1–2 minutes. Cover all the bullet points on the card.",
       },
       {
         field:       "speaking_part3",
         type:        "IELTS Speaking — Part 3",
-        instruction: "Answer the Part 3 discussion questions below. These are follow-up questions linked to the Part 2 topic. Give developed, thoughtful answers — aim for 4–6 sentences each. Express and justify your opinions clearly.",
-        prepSeconds: 15,
+        part:        3,
+        instruction: "Answer the Part 3 discussion questions below. Give developed, thoughtful answers — aim for 4–6 sentences each. Express and justify your opinions clearly.",
       },
     ],
   },
@@ -132,10 +136,6 @@ const styles = `
     --green:       #22c55e;
     --green-light: #dcfce7;
     --green-dark:  #15803d;
-    --red:         #ef4444;
-    --red-light:   #fee2e2;
-    --orange:      #f97316;
-    --orange-light:#ffedd5;
     --white:       #ffffff;
     --gray-50:     #f8faff;
     --gray-100:    #f0f4ff;
@@ -161,81 +161,50 @@ const styles = `
     -webkit-font-smoothing: antialiased;
   }
 
-  /* ── Layout ─────────────────────────────────────────── */
+  /* ── Layout ──────────────────────────────────────── */
   .app { min-height: 100vh; display: flex; flex-direction: column; }
 
   .topbar {
     background: var(--white);
     border-bottom: 1.5px solid var(--gray-200);
-    padding: 0 32px;
-    height: 64px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    position: sticky;
-    top: 0;
-    z-index: 100;
+    padding: 0 32px; height: 64px;
+    display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 100;
   }
-
   .logo {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-family: 'DM Serif Display', serif;
-    font-size: 1.35rem;
-    color: var(--blue);
-    cursor: pointer;
-    user-select: none;
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'DM Serif Display', serif; font-size: 1.35rem;
+    color: var(--blue); cursor: pointer; user-select: none;
   }
   .logo-dot { width: 8px; height: 8px; background: var(--blue); border-radius: 50%; flex-shrink: 0; }
   .logo-wordmark em { font-style: italic; }
   .logo-sub {
-    font-family: 'Sora', sans-serif;
-    font-size: 0.68rem; font-weight: 500; color: var(--gray-400);
-    letter-spacing: 0.09em; text-transform: uppercase; margin-top: 1px;
+    font-family: 'Sora', sans-serif; font-size: 0.68rem; font-weight: 500;
+    color: var(--gray-400); letter-spacing: 0.09em; text-transform: uppercase; margin-top: 1px;
   }
-
   .topbar-right { display: flex; align-items: center; gap: 10px; }
-
-  .badge {
-    font-size: 0.72rem; font-weight: 600; border-radius: 20px;
-    padding: 4px 13px; letter-spacing: 0.02em;
-  }
+  .badge { font-size: 0.72rem; font-weight: 600; border-radius: 20px; padding: 4px 13px; letter-spacing: 0.02em; }
   .badge-blue { color: var(--blue);     background: var(--blue-light); }
   .badge-gray { color: var(--gray-600); background: var(--gray-100);  }
-  .badge-red  { color: var(--red);      background: var(--red-light);  }
 
-  .main {
-    flex: 1; padding: 44px 32px 72px;
-    max-width: 860px; margin: 0 auto; width: 100%;
-  }
+  .main { flex: 1; padding: 44px 32px 72px; max-width: 860px; margin: 0 auto; width: 100%; }
 
-  /* ── Page header ─────────────────────────────────────── */
+  /* ── Page header ─────────────────────────────────── */
   .page-header { margin-bottom: 36px; }
-  .page-eyebrow {
-    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.13em;
-    text-transform: uppercase; color: var(--blue); margin-bottom: 10px;
-  }
-  .page-title {
-    font-family: 'DM Serif Display', serif; font-size: 2.25rem;
-    line-height: 1.16; letter-spacing: -0.022em; color: var(--text);
-  }
+  .page-eyebrow { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase; color: var(--blue); margin-bottom: 10px; }
+  .page-title { font-family: 'DM Serif Display', serif; font-size: 2.25rem; line-height: 1.16; letter-spacing: -0.022em; color: var(--text); }
   .page-title em { font-style: italic; color: var(--blue); }
   .page-sub { margin-top: 10px; font-size: 0.93rem; color: var(--gray-600); line-height: 1.65; }
 
-  /* ── Breadcrumb ──────────────────────────────────────── */
-  .breadcrumb {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 0.79rem; color: var(--gray-400); margin-bottom: 30px; flex-wrap: wrap;
-  }
+  /* ── Breadcrumb ──────────────────────────────────── */
+  .breadcrumb { display: flex; align-items: center; gap: 8px; font-size: 0.79rem; color: var(--gray-400); margin-bottom: 30px; flex-wrap: wrap; }
   .bc { color: var(--gray-400); }
   .bc.link { color: var(--blue); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
   .bc.link:hover { color: var(--blue-dark); }
   .bc-sep { color: var(--gray-200); font-size: 0.9rem; }
 
-  /* ── Day grid ────────────────────────────────────────── */
+  /* ── Day grid ────────────────────────────────────── */
   .day-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(186px, 1fr)); gap: 16px; }
-
   .day-card {
     border: 1.5px solid var(--gray-200); border-radius: var(--radius);
     padding: 24px 22px; cursor: pointer; transition: var(--transition);
@@ -248,16 +217,14 @@ const styles = `
   .day-card:hover::after { transform: scaleX(1); }
   .day-card:hover { border-color: var(--blue); box-shadow: var(--shadow-md); transform: translateY(-2px); }
   .day-card.locked { opacity: 0.4; pointer-events: none; cursor: default; }
-  .day-card.done   { border-color: var(--green); }
-
+  .day-card.done { border-color: var(--green); }
   .day-icon { position: absolute; top: 16px; right: 16px; font-size: 1rem; }
   .day-num { font-family: 'DM Serif Display', serif; font-size: 2.1rem; color: var(--blue); line-height: 1; margin-bottom: 5px; }
   .day-label { font-size: 0.78rem; font-weight: 600; color: var(--gray-600); text-transform: uppercase; letter-spacing: 0.07em; }
   .day-status { font-size: 0.74rem; color: var(--gray-400); margin-top: 10px; }
 
-  /* ── Block grid ──────────────────────────────────────── */
+  /* ── Block grid ──────────────────────────────────── */
   .block-grid { display: flex; flex-direction: column; gap: 13px; }
-
   .block-card {
     border: 1.5px solid var(--gray-200); border-radius: var(--radius);
     padding: 20px 26px; display: flex; align-items: center; gap: 18px;
@@ -267,7 +234,6 @@ const styles = `
   .block-card.locked  { opacity: 0.42; pointer-events: none; }
   .block-card.done    { border-color: var(--green); background: #f0fdf4; }
   .block-card.current { border-color: var(--blue);  background: var(--blue-light); }
-
   .block-num {
     width: 46px; height: 46px; border-radius: 11px;
     display: flex; align-items: center; justify-content: center;
@@ -276,14 +242,13 @@ const styles = `
   }
   .block-card.done    .block-num { background: var(--green-light); color: var(--green-dark); }
   .block-card.current .block-num { background: var(--blue);        color: var(--white); }
-
   .block-info { flex: 1; min-width: 0; }
   .block-title { font-weight: 600; font-size: 0.97rem; color: var(--text); margin-bottom: 3px; }
   .block-desc  { font-size: 0.8rem;  color: var(--gray-600); line-height: 1.45; }
   .block-meta  { font-size: 0.73rem; color: var(--gray-400); margin-top: 6px; }
   .block-arrow { color: var(--blue-mid); font-size: 1rem; flex-shrink: 0; }
 
-  /* ── Progress bar ────────────────────────────────────── */
+  /* ── Progress bar ────────────────────────────────── */
   .progress-wrap { margin-bottom: 28px; }
   .progress-row  { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; }
   .progress-label { font-size: 0.79rem; font-weight: 600; color: var(--gray-600); }
@@ -291,169 +256,106 @@ const styles = `
   .progress-track { height: 5px; background: var(--gray-100); border-radius: 10px; overflow: hidden; }
   .progress-fill  { height: 100%; background: var(--blue); border-radius: 10px; transition: width 0.4s cubic-bezier(.4,0,.2,1); }
 
-  /* ── Question card ───────────────────────────────────── */
+  /* ── Question card ───────────────────────────────── */
   .q-eyebrow {
     display: inline-flex; align-items: center; gap: 8px;
-    background: var(--blue-light); color: var(--blue); border-radius: 20px;
-    padding: 5px 14px; font-size: 0.73rem; font-weight: 600; letter-spacing: 0.04em; margin-bottom: 22px;
+    background: var(--blue-light); color: var(--blue);
+    border-radius: 20px; padding: 5px 14px;
+    font-size: 0.73rem; font-weight: 600; letter-spacing: 0.04em; margin-bottom: 22px;
   }
   .q-eyebrow-sep { opacity: 0.4; }
-
   .q-card {
     background: var(--white); border: 1.5px solid var(--gray-200);
     border-radius: var(--radius); padding: 32px 36px; margin-bottom: 22px;
     box-shadow: var(--shadow-sm); animation: fadeUp 0.28s ease both;
   }
-  @keyframes fadeUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
-
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
   .q-type-tag {
     display: inline-block; font-size: 0.67rem; font-weight: 700;
-    letter-spacing: 0.1em; text-transform: uppercase; color: var(--blue);
-    background: var(--blue-light); border-radius: 6px; padding: 3px 10px; margin-bottom: 18px;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--blue); background: var(--blue-light);
+    border-radius: 6px; padding: 3px 10px; margin-bottom: 18px;
   }
-
   .q-instruction {
     font-size: 0.83rem; color: var(--gray-600); line-height: 1.6;
-    padding: 11px 15px; background: var(--gray-50); border-left: 3px solid var(--blue-mid);
-    border-radius: 0 6px 6px 0; margin-bottom: 18px;
+    padding: 11px 15px; background: var(--gray-50);
+    border-left: 3px solid var(--blue-mid); border-radius: 0 6px 6px 0; margin-bottom: 18px;
   }
-
   .q-divider { height: 1px; background: var(--gray-200); margin: 20px 0; }
-
-  .q-task-label {
-    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em;
-    text-transform: uppercase; color: var(--gray-400); margin-bottom: 10px;
-  }
-
+  .q-task-label { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gray-400); margin-bottom: 10px; }
   .q-content { font-size: 1.04rem; color: var(--text); line-height: 1.75; white-space: pre-wrap; }
 
-  /* ── Video embed ─────────────────────────────────────── */
-  .video-wrap {
-    position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden;
-    border-radius: var(--radius-sm); background: #000; margin: 16px 0;
-  }
-  .video-wrap iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none; }
-
-  /* ── Bourdain questions ──────────────────────────────── */
-  .bourdain-qs {
-    margin-top: 16px; padding: 16px 20px;
-    background: var(--gray-50); border: 1.5px solid var(--gray-200);
-    border-radius: var(--radius-sm);
-  }
-  .bourdain-qs-label {
-    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em;
-    text-transform: uppercase; color: var(--gray-400); margin-bottom: 10px;
-  }
-  .bourdain-qs-text { font-size: 0.93rem; color: var(--text); line-height: 1.75; white-space: pre-wrap; }
-
-  /* ── Answer area (Block 1 text) ──────────────────────── */
+  /* ── Answer area ─────────────────────────────────── */
   .answer-wrap  { margin-top: 22px; }
   .answer-label { font-size: 0.76rem; font-weight: 600; color: var(--gray-600); margin-bottom: 8px; letter-spacing: 0.02em; }
   .answer-textarea {
-    width: 100%; min-height: 136px; border: 1.5px solid var(--gray-200);
-    border-radius: var(--radius-sm); padding: 14px 16px; font-family: 'Sora', sans-serif;
-    font-size: 0.9rem; color: var(--text); resize: vertical; outline: none;
-    transition: border-color 0.18s, background 0.18s; background: var(--gray-50); line-height: 1.65;
+    width: 100%; min-height: 136px;
+    border: 1.5px solid var(--gray-200); border-radius: var(--radius-sm);
+    padding: 14px 16px; font-family: 'Sora', sans-serif; font-size: 0.9rem;
+    color: var(--text); resize: vertical; outline: none;
+    transition: border-color 0.18s, background 0.18s;
+    background: var(--gray-50); line-height: 1.65;
   }
   .answer-textarea:focus { border-color: var(--blue); background: var(--white); }
   .answer-textarea::placeholder { color: var(--gray-400); }
+  .answer-textarea.short { min-height: 90px; }
 
-  /* ── Speaking timer ──────────────────────────────────── */
-  .timer-wrap {
-    display: flex; align-items: center; gap: 14px;
-    padding: 14px 18px; border-radius: var(--radius-sm);
-    background: var(--orange-light); border: 1.5px solid var(--orange);
-    margin: 16px 0;
+  /* ── Block 2 specific ────────────────────────────── */
+  .b2-video-link {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--blue); color: var(--white);
+    border-radius: var(--radius-sm); padding: 10px 18px;
+    font-size: 0.85rem; font-weight: 600; text-decoration: none;
+    margin-bottom: 22px; transition: var(--transition);
   }
-  .timer-wrap.prep { background: var(--orange-light); border-color: var(--orange); }
-  .timer-wrap.recording { background: var(--red-light); border-color: var(--red); animation: pulse-border 1.2s ease infinite; }
-  @keyframes pulse-border { 0%,100% { border-color: var(--red); } 50% { border-color: #f87171; } }
-  .timer-label { font-size: 0.78rem; font-weight: 600; color: var(--gray-800); flex: 1; }
-  .timer-clock {
-    font-size: 1.35rem; font-weight: 700; font-variant-numeric: tabular-nums;
-    color: var(--orange); min-width: 70px; text-align: right;
-  }
-  .timer-clock.recording { color: var(--red); }
-  .timer-badge {
-    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
-    padding: 3px 9px; border-radius: 20px;
-  }
-  .timer-badge.prep { background: var(--orange-light); color: var(--orange); border: 1px solid var(--orange); }
-  .timer-badge.recording { background: var(--red-light); color: var(--red); border: 1px solid var(--red); }
+  .b2-video-link:hover { background: var(--blue-dark); }
 
-  /* ── Audio recorder ──────────────────────────────────── */
-  .recorder-wrap {
-    margin-top: 22px; padding: 22px 24px;
-    border: 1.5px dashed var(--gray-200); border-radius: var(--radius-sm);
-    background: var(--gray-50);
+  .b2-prompt-group { margin-bottom: 20px; }
+  .b2-prompt-label {
+    font-size: 0.78rem; font-weight: 700; color: var(--text);
+    margin-bottom: 6px; display: block;
   }
-  .recorder-wrap.has-recording { border-color: var(--green); border-style: solid; background: #f0fdf4; }
-  .recorder-label {
-    font-size: 0.76rem; font-weight: 600; color: var(--gray-600); margin-bottom: 14px; letter-spacing: 0.02em;
+  .b2-q-item { margin-bottom: 22px; }
+  .b2-q-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; border-radius: 50%;
+    background: var(--blue-light); color: var(--blue);
+    font-size: 0.72rem; font-weight: 700; flex-shrink: 0;
+    margin-right: 8px; vertical-align: middle;
   }
-  .recorder-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-
-  .btn-record {
-    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-    border: none; border-radius: var(--radius-sm); font-family: 'Sora', sans-serif;
-    font-size: 0.87rem; font-weight: 600; padding: 11px 22px; cursor: pointer;
-    transition: var(--transition); outline: none;
-    background: var(--red); color: var(--white);
-    box-shadow: 0 2px 10px rgba(239,68,68,0.3);
-  }
-  .btn-record:hover { background: #dc2626; transform: translateY(-1px); }
-  .btn-record.recording { animation: pulse-bg 1.2s ease infinite; }
-  @keyframes pulse-bg { 0%,100% { background: var(--red); } 50% { background: #dc2626; } }
-  .btn-record:disabled { opacity: 0.42; pointer-events: none; }
-
-  .audio-preview {
-    width: 100%; margin-top: 14px; border-radius: var(--radius-sm);
-    outline: none; accent-color: var(--blue);
+  .b2-q-text {
+    font-size: 0.93rem; color: var(--text); line-height: 1.55;
+    margin-bottom: 8px; font-weight: 500;
   }
 
-  .recorder-meta {
-    font-size: 0.75rem; color: var(--gray-400); margin-top: 10px; display: flex; gap: 16px; flex-wrap: wrap;
+  /* ── Block 3 speaking timer ──────────────────────── */
+  .speaking-timer {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: var(--gray-100); border: 1.5px solid var(--gray-200);
+    border-radius: var(--radius-sm); padding: 10px 18px;
+    margin-bottom: 20px;
   }
-  .recorder-meta span { display: flex; align-items: center; gap: 4px; }
+  .speaking-timer.running { background: var(--blue-light); border-color: var(--blue-mid); }
+  .timer-display {
+    font-family: 'DM Serif Display', serif; font-size: 1.5rem;
+    color: var(--blue); letter-spacing: 0.02em; min-width: 56px;
+  }
+  .timer-label { font-size: 0.76rem; font-weight: 600; color: var(--gray-600); }
+  .timer-btn {
+    font-size: 0.8rem; font-weight: 600; border: 1.5px solid var(--blue);
+    color: var(--blue); background: var(--white); border-radius: 6px;
+    padding: 4px 12px; cursor: pointer; transition: var(--transition);
+  }
+  .timer-btn:hover { background: var(--blue); color: var(--white); }
+  .timer-btn.stop { border-color: var(--gray-400); color: var(--gray-600); }
+  .timer-btn.stop:hover { background: var(--gray-200); }
 
-  /* ── Submission status ───────────────────────────────── */
-  .submit-status {
-    margin-top: 14px; padding: 10px 14px; border-radius: var(--radius-sm);
-    font-size: 0.82rem; font-weight: 500; display: flex; align-items: center; gap: 8px;
-  }
-  .submit-status.pending  { background: var(--blue-light);  color: var(--blue);       border: 1px solid var(--blue-mid); }
-  .submit-status.success  { background: var(--green-light); color: var(--green-dark); border: 1px solid var(--green); }
-  .submit-status.error    { background: var(--red-light);   color: var(--red);        border: 1px solid var(--red); }
-
-  /* ── Scores card ─────────────────────────────────────── */
-  .scores-wrap {
-    margin-top: 16px; padding: 20px 24px;
-    border: 1.5px solid var(--green); border-radius: var(--radius-sm);
-    background: var(--green-light); animation: fadeUp 0.3s ease;
-  }
-  .scores-title {
-    font-size: 0.75rem; font-weight: 700; letter-spacing: 0.1em;
-    text-transform: uppercase; color: var(--green-dark); margin-bottom: 14px;
-  }
-  .scores-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin-bottom: 14px; }
-  .score-pill {
-    background: var(--white); border-radius: var(--radius-sm);
-    padding: 10px 14px; border: 1px solid var(--green);
-  }
-  .score-pill-label { font-size: 0.7rem; font-weight: 600; color: var(--gray-600); margin-bottom: 4px; }
-  .score-pill-val   { font-size: 1.45rem; font-weight: 700; color: var(--green-dark); font-variant-numeric: tabular-nums; }
-  .score-pill.overall { border-color: var(--blue); }
-  .score-pill.overall .score-pill-label { color: var(--blue); }
-  .score-pill.overall .score-pill-val   { color: var(--blue); }
-  .scores-text { font-size: 0.83rem; color: var(--gray-800); line-height: 1.65; }
-  .scores-text strong { color: var(--green-dark); }
-
-  /* ── Buttons ─────────────────────────────────────────── */
+  /* ── Buttons ─────────────────────────────────────── */
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-    border: none; border-radius: var(--radius-sm); font-family: 'Sora', sans-serif;
-    font-size: 0.87rem; font-weight: 600; padding: 11px 22px; cursor: pointer;
-    transition: var(--transition); outline: none; white-space: nowrap;
+    border: none; border-radius: var(--radius-sm);
+    font-family: 'Sora', sans-serif; font-size: 0.87rem; font-weight: 600;
+    padding: 11px 22px; cursor: pointer; transition: var(--transition); outline: none; white-space: nowrap;
   }
   .btn-primary { background: var(--blue); color: var(--white); box-shadow: 0 2px 10px rgba(58,134,255,0.3); }
   .btn-primary:hover { background: var(--blue-dark); box-shadow: 0 4px 18px rgba(58,134,255,0.38); transform: translateY(-1px); }
@@ -463,18 +365,19 @@ const styles = `
   .btn:disabled { opacity: 0.42; pointer-events: none; }
   .btn-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
-  /* ── Complete screen ─────────────────────────────────── */
+  /* ── Complete screen ─────────────────────────────── */
   .complete-card {
     text-align: center; padding: 60px 40px;
     border: 1.5px solid var(--green); border-radius: var(--radius);
-    background: linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%); animation: fadeUp 0.35s ease;
+    background: linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%);
+    animation: fadeUp 0.35s ease;
   }
   .complete-icon  { font-size: 3.4rem; margin-bottom: 18px; }
   .complete-title { font-family: 'DM Serif Display', serif; font-size: 1.85rem; color: var(--green-dark); margin-bottom: 12px; }
   .complete-sub   { font-size: 0.94rem; color: #166534; line-height: 1.65; }
   .complete-actions { margin-top: 30px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
 
-  /* ── Skeleton loader ─────────────────────────────────── */
+  /* ── Skeleton ────────────────────────────────────── */
   .skeleton {
     background: linear-gradient(90deg, var(--gray-100) 25%, var(--gray-200) 50%, var(--gray-100) 75%);
     background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 8px;
@@ -486,7 +389,7 @@ const styles = `
   .sk-h2.w45 { width: 45%; }
   .sk-card { height: 220px; border-radius: var(--radius); margin-top: 24px; }
 
-  /* ── Fallback ────────────────────────────────────────── */
+  /* ── Fallback ────────────────────────────────────── */
   .fallback-card {
     text-align: center; padding: 60px 36px;
     border: 1.5px solid var(--gray-200); border-radius: var(--radius);
@@ -495,12 +398,9 @@ const styles = `
   .fallback-icon  { font-size: 2.8rem; margin-bottom: 16px; }
   .fallback-title { font-family: 'DM Serif Display', serif; font-size: 1.5rem; color: var(--gray-800); margin-bottom: 10px; }
   .fallback-sub   { font-size: 0.9rem; color: var(--gray-600); line-height: 1.65; }
-  .fallback-contact {
-    display: inline-block; margin-top: 22px; font-size: 0.87rem; font-weight: 600;
-    color: var(--blue); background: var(--blue-light); border-radius: 8px; padding: 10px 22px;
-  }
+  .fallback-contact { display: inline-block; margin-top: 22px; font-size: 0.87rem; font-weight: 600; color: var(--blue); background: var(--blue-light); border-radius: 8px; padding: 10px 22px; }
 
-  /* ── Responsive ──────────────────────────────────────── */
+  /* ── Responsive ──────────────────────────────────── */
   @media (max-width: 600px) {
     .topbar { padding: 0 18px; }
     .main   { padding: 26px 18px 56px; }
@@ -508,12 +408,11 @@ const styles = `
     .page-title { font-size: 1.75rem; }
     .day-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
     .block-card { padding: 16px 18px; }
-    .scores-grid { grid-template-columns: 1fr 1fr; }
   }
 `;
 
 // ─────────────────────────────────────────────────────────────
-// ANALYTICS  →  POST /api/sessions  &  POST /api/events
+// ANALYTICS  (fire-and-forget, never blocks UI)
 // ─────────────────────────────────────────────────────────────
 const Analytics = (() => {
   const sessionId    = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -537,7 +436,7 @@ const Analytics = (() => {
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify(body),
       });
-    } catch (_) { /* silent */ }
+    } catch (_) { /* silent — analytics must never break the UI */ }
   }
 
   return {
@@ -561,7 +460,7 @@ const Analytics = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────
-// LOCAL STORAGE — lightweight progress gate
+// LOCAL STORAGE — progress gate
 // ─────────────────────────────────────────────────────────────
 const Progress = {
   _key: "ielts_progress",
@@ -597,30 +496,10 @@ const Api = {
       });
     } catch (_) { /* silent */ }
   },
-
-  /** Upload audio + metadata; returns { ok, transcript, scores, storage_path } */
-  async submitSpeaking({ audioBlob, sessionId, day, questionField, questionType, prepTimeMs, retryCount }) {
-    const form = new FormData();
-    form.append("audio",          audioBlob, "recording.webm");
-    form.append("session_id",     sessionId);
-    form.append("day",            String(day));
-    form.append("question_field", questionField);
-    form.append("question_type",  questionType || questionField);
-    form.append("prep_time_ms",   String(prepTimeMs || 0));
-    form.append("retry_count",    String(retryCount || 0));
-
-    const res = await fetch(`${API_BASE}/api/speaking/submit`, {
-      method: "POST",
-      body:   form,
-    });
-    const json = await res.json();
-    if (!res.ok && res.status !== 207) throw new Error(json.error || "Upload failed");
-    return json;
-  },
 };
 
 // ─────────────────────────────────────────────────────────────
-// SHARED UI COMPONENTS
+// SHARED COMPONENTS
 // ─────────────────────────────────────────────────────────────
 function TopBar({ day, onLogoClick }) {
   return (
@@ -645,10 +524,7 @@ function Breadcrumb({ items }) {
     <nav className="breadcrumb" aria-label="breadcrumb">
       {items.map((item, i) => (
         <span key={i}>
-          <span
-            className={`bc${item.onClick ? " link" : ""}`}
-            onClick={item.onClick ?? undefined}
-          >
+          <span className={`bc${item.onClick ? " link" : ""}`} onClick={item.onClick ?? undefined}>
             {item.label}
           </span>
           {i < items.length - 1 && <span className="bc-sep" aria-hidden>›</span>}
@@ -704,298 +580,136 @@ function Fallback({ onRetry }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// YOUTUBE EMBED COMPONENT
+// SPEAKING TIMER  (Block 3 Part 2 only)
+// Counts up from 0. No countdown. No prep phase.
+// User starts it when they're ready to speak.
 // ─────────────────────────────────────────────────────────────
-function YouTubeEmbed({ url }) {
-  const embed = youtubeEmbedUrl(url);
-  return (
-    <div className="video-wrap">
-      <iframe
-        src={embed}
-        title="Video"
-        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-        allowFullScreen
-      />
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────
-// SPEAKING TIMER COMPONENT
-// Tracks prep time (from mount) and recording duration.
-// ─────────────────────────────────────────────────────────────
-function SpeakingTimer({ isRecording, prepSeconds }) {
-  const [prepElapsed,  setPrepElapsed]  = useState(0);   // seconds since page load
-  const [recElapsed,   setRecElapsed]   = useState(0);   // seconds since recording started
-  const mountRef   = useRef(Date.now());
-  const recStartRef = useRef(null);
+function SpeakingTimer() {
+  const [seconds,  setSeconds]  = useState(0);
+  const [running,  setRunning]  = useState(false);
+  const intervalRef = useRef(null);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - mountRef.current) / 1000);
-      setPrepElapsed(elapsed);
-      if (recStartRef.current) {
-        setRecElapsed(Math.floor((Date.now() - recStartRef.current) / 1000));
-      }
-    }, 500);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    if (isRecording && !recStartRef.current) {
-      recStartRef.current = Date.now();
-    } else if (!isRecording) {
-      recStartRef.current = null;
-      setRecElapsed(0);
+    if (running) {
+      intervalRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+    } else {
+      clearInterval(intervalRef.current);
     }
-  }, [isRecording]);
+    return () => clearInterval(intervalRef.current);
+  }, [running]);
 
-  function fmt(s) {
+  const fmt = (s) => {
     const m = Math.floor(s / 60);
     const sec = s % 60;
     return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  }
+  };
 
-  if (isRecording) {
-    return (
-      <div className="timer-wrap recording" role="timer" aria-live="polite">
-        <span className="timer-badge recording">● REC</span>
-        <span className="timer-label">Recording time</span>
-        <span className="timer-clock recording">{fmt(recElapsed)}</span>
-      </div>
-    );
-  }
-
-  const remaining = Math.max(0, (prepSeconds || 30) - prepElapsed);
-  return (
-    <div className="timer-wrap prep" role="timer" aria-live="polite">
-      <span className="timer-badge prep">⏱ PREP</span>
-      <span className="timer-label">
-        {remaining > 0
-          ? `Preparation time — ${remaining}s remaining`
-          : "Preparation time complete — start recording when ready"}
-      </span>
-      <span className="timer-clock">{fmt(prepElapsed)}</span>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────
-// AUDIO RECORDER COMPONENT
-// Handles recording, preview, and submission to /api/speaking/submit
-// ─────────────────────────────────────────────────────────────
-function AudioRecorder({ sessionId, day, questionField, questionType, onRecordStart, prepTimeMs }) {
-  const [isRecording,  setIsRecording]  = useState(false);
-  const [audioUrl,     setAudioUrl]     = useState(null);
-  const [audioBlob,    setAudioBlob]    = useState(null);
-  const [retryCount,   setRetryCount]   = useState(0);
-  const [submitState,  setSubmitState]  = useState("idle"); // idle|pending|success|error
-  const [scores,       setScores]       = useState(null);
-  const [transcript,   setTranscript]   = useState(null);
-  const [errorMsg,     setErrorMsg]     = useState("");
-
-  const mediaRef    = useRef(null);
-  const chunksRef   = useRef([]);
-
-  const startRecording = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream, { mimeType: "audio/webm" });
-      chunksRef.current = [];
-
-      mr.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-
-      mr.onstop = () => {
-        stream.getTracks().forEach(t => t.stop());
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-        const url  = URL.createObjectURL(blob);
-        setAudioBlob(blob);
-        setAudioUrl(url);
-        setSubmitState("idle");
-        setScores(null);
-        setTranscript(null);
-      };
-
-      mr.start(1000); // collect in 1-second chunks
-      mediaRef.current = mr;
-      setIsRecording(true);
-      setAudioUrl(null);
-      setAudioBlob(null);
-      if (onRecordStart) onRecordStart();
-    } catch (err) {
-      setErrorMsg("Microphone access denied. Please allow microphone and try again.");
-    }
-  }, [onRecordStart]);
-
-  const stopRecording = useCallback(() => {
-    if (mediaRef.current && mediaRef.current.state !== "inactive") {
-      mediaRef.current.stop();
-    }
-    setIsRecording(false);
-  }, []);
-
-  const handleRetry = useCallback(() => {
-    setRetryCount(c => c + 1);
-    setAudioUrl(null);
-    setAudioBlob(null);
-    setSubmitState("idle");
-    setScores(null);
-    setTranscript(null);
-    startRecording();
-  }, [startRecording]);
-
-  const handleSubmit = useCallback(async () => {
-    if (!audioBlob) return;
-    setSubmitState("pending");
-    setErrorMsg("");
-    try {
-      const result = await Api.submitSpeaking({
-        audioBlob,
-        sessionId,
-        day,
-        questionField,
-        questionType,
-        prepTimeMs,
-        retryCount,
-      });
-      setSubmitState("success");
-      if (result.scores)     setScores(result.scores);
-      if (result.transcript) setTranscript(result.transcript);
-      Analytics.track("speaking_submitted", { day, questionField, retryCount, hasScores: !!result.scores });
-    } catch (err) {
-      setSubmitState("error");
-      setErrorMsg(err.message || "Submission failed. Please try again.");
-      Analytics.track("speaking_submit_error", { day, questionField, error: err.message });
-    }
-  }, [audioBlob, sessionId, day, questionField, questionType, prepTimeMs, retryCount]);
-
-  // Clean up object URLs
-  useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }, [audioUrl]);
+  const handleReset = () => {
+    setRunning(false);
+    setSeconds(0);
+  };
 
   return (
-    <div className={`recorder-wrap${audioUrl ? " has-recording" : ""}`}>
-      <div className="recorder-label">🎙 Your spoken response</div>
-
-      <div className="recorder-controls">
-        {!isRecording && !audioUrl && (
-          <button className="btn-record" onClick={startRecording}>
-            ● Start Recording
-          </button>
-        )}
-
-        {isRecording && (
-          <button className="btn-record recording" onClick={stopRecording}>
-            ■ Stop Recording
-          </button>
-        )}
-
-        {audioUrl && !isRecording && (
-          <>
-            <button
-              className="btn-record"
-              onClick={handleRetry}
-              disabled={submitState === "pending" || submitState === "success"}
-            >
-              ↺ Re-record
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={handleSubmit}
-              disabled={submitState === "pending" || submitState === "success"}
-            >
-              {submitState === "pending" ? "Submitting…" : submitState === "success" ? "✓ Submitted" : "Submit Answer"}
-            </button>
-          </>
-        )}
+    <div className={`speaking-timer${running ? " running" : ""}`}>
+      <div>
+        <div className="timer-label">{running ? "Speaking time" : "Ready when you are"}</div>
+        <div className="timer-display">{fmt(seconds)}</div>
       </div>
-
-      {errorMsg && (
-        <div className="submit-status error">⚠️ {errorMsg}</div>
-      )}
-
-      {audioUrl && (
+      {!running ? (
+        <button className="timer-btn" onClick={() => setRunning(true)}>
+          ▶ Start timer
+        </button>
+      ) : (
         <>
-          <audio className="audio-preview" controls src={audioUrl} />
-          <div className="recorder-meta">
-            {retryCount > 0 && <span>🔁 Retries: {retryCount}</span>}
-          </div>
+          <button className="timer-btn stop" onClick={() => setRunning(false)}>⏸ Pause</button>
+          <button className="timer-btn stop" onClick={handleReset}>↺ Reset</button>
         </>
       )}
-
-      {submitState === "pending" && (
-        <div className="submit-status pending">
-          ⏳ Uploading and transcribing your response — this may take a moment…
-        </div>
-      )}
-
-      {submitState === "success" && !scores && (
-        <div className="submit-status success">✓ Response submitted successfully!</div>
-      )}
-
-      {submitState === "error" && !errorMsg && (
-        <div className="submit-status error">❌ Submission failed. Please try again.</div>
-      )}
-
-      {scores && <ScoresCard scores={scores} transcript={transcript} />}
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────
-// SCORES DISPLAY COMPONENT
+// BLOCK 2 ANSWER PANELS
+// Each variant renders differently — all typed, no mic.
 // ─────────────────────────────────────────────────────────────
-function ScoresCard({ scores, transcript }) {
-  if (!scores) return null;
+
+// Band 9 — note-taking with 4 labelled prompts
+// answer stored as JSON: { vocab, phrases, expansion, improvement }
+function Band9AnswerPanel({ prompts, value, onChange }) {
+  const parsed = (() => {
+    try { return JSON.parse(value || "{}"); }
+    catch { return {}; }
+  })();
+
+  const handleChange = (key, text) => {
+    onChange(JSON.stringify({ ...parsed, [key]: text }));
+  };
+
   return (
-    <div className="scores-wrap" role="region" aria-label="IELTS Score">
-      <div className="scores-title">🏅 IELTS Examiner Feedback</div>
-      <div className="scores-grid">
-        <div className="score-pill overall">
-          <div className="score-pill-label">Overall Band</div>
-          <div className="score-pill-val">{scores.overall_band ?? "—"}</div>
+    <div className="answer-wrap">
+      {prompts.map((p) => (
+        <div key={p.key} className="b2-prompt-group">
+          <label className="b2-prompt-label">{p.label}</label>
+          <textarea
+            className="answer-textarea short"
+            placeholder={p.placeholder}
+            value={parsed[p.key] || ""}
+            onChange={(e) => handleChange(p.key, e.target.value)}
+            aria-label={p.label}
+          />
         </div>
-        <div className="score-pill">
-          <div className="score-pill-label">Fluency & Coherence</div>
-          <div className="score-pill-val">{scores.fluency_coherence ?? "—"}</div>
-        </div>
-        <div className="score-pill">
-          <div className="score-pill-label">Lexical Resource</div>
-          <div className="score-pill-val">{scores.lexical_resource ?? "—"}</div>
-        </div>
-        <div className="score-pill">
-          <div className="score-pill-label">Grammar Range</div>
-          <div className="score-pill-val">{scores.grammatical_range ?? "—"}</div>
-        </div>
-      </div>
+      ))}
+    </div>
+  );
+}
 
-      {scores.strengths && (
-        <div className="scores-text" style={{ marginBottom: 10 }}>
-          <strong>✅ Strengths:</strong> {scores.strengths}
-        </div>
-      )}
-      {scores.improvements && (
-        <div className="scores-text" style={{ marginBottom: 10 }}>
-          <strong>📈 To improve:</strong> {scores.improvements}
-        </div>
-      )}
-      {scores.examiner_note && (
-        <div className="scores-text">
-          <strong>💬 Examiner:</strong> {scores.examiner_note}
-        </div>
-      )}
+// Bourdain — 4 numbered questions, one textarea each
+// answer stored as JSON: { "0": "...", "1": "...", ... }
+function BourdainAnswerPanel({ questions, value, onChange }) {
+  const parsed = (() => {
+    try { return JSON.parse(value || "{}"); }
+    catch { return {}; }
+  })();
 
-      {transcript && (
-        <details style={{ marginTop: 14 }}>
-          <summary style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--gray-600)", cursor: "pointer" }}>
-            📄 View transcript
-          </summary>
-          <p style={{ marginTop: 10, fontSize: "0.86rem", color: "var(--text)", lineHeight: 1.7, whiteSpace: "pre-wrap" }}>
-            {transcript}
-          </p>
-        </details>
-      )}
+  const handleChange = (idx, text) => {
+    onChange(JSON.stringify({ ...parsed, [idx]: text }));
+  };
+
+  return (
+    <div className="answer-wrap">
+      {questions.map((q, i) => (
+        <div key={i} className="b2-q-item">
+          <div className="b2-q-text">
+            <span className="b2-q-num">{i + 1}</span>
+            {q}
+          </div>
+          <textarea
+            className="answer-textarea short"
+            placeholder="Your answer…"
+            value={parsed[i] || ""}
+            onChange={(e) => handleChange(i, e.target.value)}
+            aria-label={`Question ${i + 1}`}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Video Reflection — single open textarea for free response
+function ReflectionAnswerPanel({ value, onChange }) {
+  return (
+    <div className="answer-wrap">
+      <div className="answer-label">Your thoughts</div>
+      <textarea
+        className="answer-textarea"
+        style={{ minHeight: 180 }}
+        placeholder="Share your reaction honestly — your opinion, how it made you feel, whether you agree or disagree, and any personal connection it brought up…"
+        value={value || ""}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label="Video reflection"
+      />
     </div>
   );
 }
@@ -1116,7 +830,7 @@ function BlockPage({ day, onSelectBlock, onBack }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PAGE 3 — QUESTION PAGE
+// PAGE 3-5 — QUESTION PAGE
 // ─────────────────────────────────────────────────────────────
 function QuestionPage({ day, block, onBack, onComplete }) {
   const def = BLOCK_DEFINITIONS[block];
@@ -1125,16 +839,14 @@ function QuestionPage({ day, block, onBack, onComplete }) {
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState(false);
   const [current,    setCurrent]    = useState(0);
-  const [answers,    setAnswers]    = useState({});     // Block 1 text answers
+  const [answers,    setAnswers]    = useState({});
   const [done,       setDone]       = useState(false);
-  const [isRecording, setIsRecording] = useState(false); // passed down for timer
 
-  const blockStartRef   = useRef(Date.now());
-  const qStartRef       = useRef(Date.now());
-  const fetchCount      = useRef(0);
-  const pageMountRef    = useRef(Date.now()); // for prep time calc
+  const blockStartRef = useRef(Date.now());
+  const qStartRef     = useRef(Date.now());
+  const fetchCount    = useRef(0);
 
-  // ── Fetch ──────────────────────────────────────────────
+  // ── Fetch ───────────────────────────────────────────
   const fetchContent = () => {
     setLoading(true);
     setError(false);
@@ -1159,39 +871,33 @@ function QuestionPage({ day, block, onBack, onComplete }) {
         setLoading(false);
         blockStartRef.current = Date.now();
         qStartRef.current     = Date.now();
-        pageMountRef.current  = Date.now();
       });
   };
 
   useEffect(fetchContent, [day, block]);
-  useEffect(() => {
-    qStartRef.current    = Date.now();
-    pageMountRef.current = Date.now(); // reset prep timer when question changes
-    setIsRecording(false);
-  }, [current]);
+  useEffect(() => { qStartRef.current = Date.now(); }, [current]);
 
-  // ── Handlers ───────────────────────────────────────────
+  // ── Save & advance ──────────────────────────────────
   const handleNext = async () => {
     const qDef        = def.questions[current];
     const timeSpentMs = Date.now() - qStartRef.current;
     const answerText  = answers[current] ?? "";
 
-    // For Block 1, save text answer. Blocks 2 & 3 save via AudioRecorder.
-    if (block === 1) {
-      await Api.saveAnswer({
-        session_id:    Analytics.sessionId,
-        day,
-        block,
-        question_field: qDef.field,
-        question_type:  qDef.type,
-        answer_text:    answerText,
-        time_spent_ms:  timeSpentMs,
-      });
-    }
+    await Api.saveAnswer({
+      session_id:     Analytics.sessionId,
+      day,
+      block,
+      question_field: qDef.field,
+      question_type:  qDef.type,
+      answer_text:    answerText,
+      time_spent_ms:  timeSpentMs,
+    });
 
     Analytics.track("question_answered", {
-      day, block, question_field: qDef.field,
-      answer_length: answerText.length, time_spent_ms: timeSpentMs,
+      day, block,
+      question_field: qDef.field,
+      answer_length:  answerText.length,
+      time_spent_ms:  timeSpentMs,
     });
 
     if (current < def.questions.length - 1) {
@@ -1211,17 +917,83 @@ function QuestionPage({ day, block, onBack, onComplete }) {
     }
   };
 
-  // ── Breadcrumbs ─────────────────────────────────────────
+  // ── Render answer area based on question variant ────
+  const renderAnswerArea = (qDef) => {
+    const value    = answers[current] ?? "";
+    const onChange = (v) => setAnswers((prev) => ({ ...prev, [current]: v }));
+
+    // Block 2 variants
+    if (qDef.variant === "band9") {
+      return (
+        <Band9AnswerPanel
+          prompts={qDef.prompts}
+          value={value}
+          onChange={onChange}
+        />
+      );
+    }
+
+    if (qDef.variant === "bourdain") {
+      return (
+        <BourdainAnswerPanel
+          questions={qDef.questions}
+          value={value}
+          onChange={onChange}
+        />
+      );
+    }
+
+    if (qDef.variant === "reflection") {
+      return <ReflectionAnswerPanel value={value} onChange={onChange} />;
+    }
+
+    // Block 3 Part 2 — speaking timer above the textarea, no prep countdown
+    if (block === 3 && qDef.part === 2) {
+      return (
+        <div className="answer-wrap">
+          <SpeakingTimer />
+          <div className="answer-label">Your spoken response (written)</div>
+          <textarea
+            className="answer-textarea"
+            placeholder="Write your answer as if you were speaking aloud. Cover all the bullet points on the cue card…"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            aria-label="Speaking Part 2 response"
+          />
+        </div>
+      );
+    }
+
+    // Default — all Block 1 questions and Block 3 Parts 1 & 3
+    return (
+      <div className="answer-wrap">
+        <div className="answer-label">Your answer</div>
+        <textarea
+          className="answer-textarea"
+          placeholder="Write your answer here…"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={`Answer for ${qDef.type}`}
+        />
+      </div>
+    );
+  };
+
+  // ── Shared breadcrumbs ──────────────────────────────
   const crumbs = [
     { label: "Days",       onClick: onBack },
     { label: `Day ${day}`, onClick: onBack },
     { label: `Block ${block}` },
   ];
 
-  if (loading) return <main className="main"><Breadcrumb items={crumbs} /><SkeletonLoader /></main>;
-  if (error || !dayContent) return <main className="main"><Breadcrumb items={crumbs} /><Fallback onRetry={fetchContent} /></main>;
+  if (loading) {
+    return <main className="main"><Breadcrumb items={crumbs} /><SkeletonLoader /></main>;
+  }
 
-  // ── Completion screen ───────────────────────────────────
+  if (error || !dayContent) {
+    return <main className="main"><Breadcrumb items={crumbs} /><Fallback onRetry={fetchContent} /></main>;
+  }
+
   if (done) {
     return (
       <main className="main">
@@ -1236,29 +1008,25 @@ function QuestionPage({ day, block, onBack, onComplete }) {
               : `Amazing work — you've completed all blocks for Day ${day}! 🏆`}
           </p>
           <div className="complete-actions">
-            {/* Two buttons: next block OR back to all blocks */}
-            {block < 3 && (
-              <button className="btn btn-primary" onClick={onComplete}>
-                Continue to Block {block + 1} →
-              </button>
-            )}
-            <button className="btn btn-ghost" onClick={onBack}>
-              ← Return to all blocks
+            <button className="btn btn-primary" onClick={onComplete}>
+              {block < 3 ? `Continue to Block ${block + 1} →` : "🏆 Back to Days"}
             </button>
-            {block === 3 && (
-              <button className="btn btn-primary" onClick={() => { Analytics.track("nav_back_days_final"); onComplete(); }}>
-                🏆 Back to Days
-              </button>
-            )}
+            <button className="btn btn-ghost" onClick={onBack}>Back to Blocks</button>
           </div>
         </div>
       </main>
     );
   }
 
-  // ── Active question ────────────────────────────────────
-  const qDef    = def.questions[current];
+  const qDef   = def.questions[current];
   const content = dayContent[qDef.field] ?? null;
+
+  // Extract a video URL from content if present (used in Block 2)
+  const videoUrl = (() => {
+    if (!content) return null;
+    const match = content.match(/https?:\/\/[^\s\n]+/);
+    return match ? match[0] : null;
+  })();
 
   return (
     <main className="main">
@@ -1276,105 +1044,42 @@ function QuestionPage({ day, block, onBack, onComplete }) {
         <div className="q-type-tag">{qDef.type}</div>
         <div className="q-instruction">{qDef.instruction}</div>
 
-        {/* ── BLOCK 2: Video questions ─────────────────── */}
-        {block === 2 && (
+        {content ? (
           <>
             <div className="q-divider" aria-hidden />
-            <div className="q-task-label">Watch the video</div>
-            <YouTubeEmbed url={qDef.videoField ? dayContent[qDef.videoField] : null} />
+            <div className="q-task-label">Today's Task</div>
 
-            {/* Bourdain questions from DB */}
-            {qDef.questionsField && dayContent[qDef.questionsField] && (
-              <div className="bourdain-qs">
-                <div className="bourdain-qs-label">📋 Comprehension Questions</div>
-                <div className="bourdain-qs-text">{dayContent[qDef.questionsField]}</div>
-              </div>
-            )}
-
-            {/* Audio recorder for Block 2 */}
-            <AudioRecorder
-              sessionId={Analytics.sessionId}
-              day={day}
-              questionField={qDef.field}
-              questionType={qDef.type}
-              prepTimeMs={0}
-              onRecordStart={() => setIsRecording(true)}
-            />
-          </>
-        )}
-
-        {/* ── BLOCK 3: Speaking simulation ─────────────── */}
-        {block === 3 && (
-          <>
-            <div className="q-divider" aria-hidden />
-
-            {/* Speaking timer */}
-            <SpeakingTimer
-              isRecording={isRecording}
-              prepSeconds={qDef.prepSeconds || 30}
-            />
-
-            {/* Task content (cue card / questions from DB) */}
-            {content ? (
+            {/* If a video URL is present, render a watch button, then the rest of the text */}
+            {videoUrl ? (
               <>
-                <div className="q-task-label">Today's Task</div>
-                <div className="q-content">{content}</div>
+                <a
+                  href={videoUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="b2-video-link"
+                >
+                  ▶ Watch today's video
+                </a>
+                {/* Show any text below the URL (e.g. Bourdain questions context) */}
+                <div className="q-content">
+                  {content.replace(videoUrl, "").trim()}
+                </div>
               </>
             ) : (
-              <div className="fallback-sub" style={{ marginTop: 12 }}>
-                ⚠️ No task content for this question today.
-              </div>
+              <div className="q-content">{content}</div>
             )}
-
-            {/* Audio recorder — no text area for Block 3 */}
-            <AudioRecorder
-              sessionId={Analytics.sessionId}
-              day={day}
-              questionField={qDef.field}
-              questionType={qDef.type}
-              prepTimeMs={Date.now() - pageMountRef.current}
-              onRecordStart={() => setIsRecording(true)}
-            />
           </>
+        ) : (
+          <div className="fallback-sub" style={{ marginTop: 12 }}>
+            ⚠️ No task content for this question today.
+          </div>
         )}
 
-        {/* ── BLOCK 1: Text questions (unchanged) ──────── */}
-        {block === 1 && (
-          <>
-            {content ? (
-              <>
-                <div className="q-divider" aria-hidden />
-                <div className="q-task-label">Today's Task</div>
-                <div className="q-content">{content}</div>
-              </>
-            ) : (
-              <div className="fallback-sub" style={{ marginTop: 12 }}>
-                ⚠️ No task content for this question today.
-              </div>
-            )}
-
-            <div className="answer-wrap">
-              <div className="answer-label">Your answer</div>
-              <textarea
-                className="answer-textarea"
-                placeholder="Write your answer here…"
-                value={answers[current] ?? ""}
-                onChange={(e) =>
-                  setAnswers((prev) => ({ ...prev, [current]: e.target.value }))
-                }
-                aria-label={`Answer for ${qDef.type}`}
-              />
-            </div>
-          </>
-        )}
+        {renderAnswerArea(qDef)}
       </div>
 
       <div className="btn-row">
-        <button
-          className="btn btn-ghost"
-          onClick={handlePrev}
-          disabled={current === 0}
-        >
+        <button className="btn btn-ghost" onClick={handlePrev} disabled={current === 0}>
           ← Previous
         </button>
         <button className="btn btn-primary" onClick={handleNext}>
@@ -1426,7 +1131,9 @@ export default function App() {
     <div className="app">
       <TopBar day={day} onLogoClick={goToDays} />
 
-      {page === "days" && <DayPage onSelectDay={goToBlocks} />}
+      {page === "days" && (
+        <DayPage onSelectDay={goToBlocks} />
+      )}
 
       {page === "blocks" && day && (
         <BlockPage day={day} onSelectBlock={goToQuestion} onBack={goToDays} />
