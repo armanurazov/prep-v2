@@ -125,7 +125,7 @@ const BLOCK_DEFINITIONS = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// STYLES
+// STYLES  (unchanged)
 // ─────────────────────────────────────────────────────────────
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=DM+Serif+Display:ital@0;1&display=swap');
@@ -521,22 +521,47 @@ const styles = `
 
 // ─────────────────────────────────────────────────────────────
 // ANALYTICS
+// CHANGED: expanded from basic track/initSession to full
+// behavioural tracking. All existing track() call-sites in the
+// rest of the file are 100% compatible — the signature is the
+// same. Only the internals and the new attachGlobalTracking()
+// method are added.
 // ─────────────────────────────────────────────────────────────
 const Analytics = (() => {
   const sessionId    = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const sessionStart = Date.now();
+  let   idleTimer    = null;
+  const IDLE_MS      = 30_000; // fire "user_idle" after 30 s of no movement
 
+  // ── Rich device/session fingerprint ──────────────────────
   function deviceInfo() {
+    let conn = {};
+    try {
+      const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      if (c) conn = { effectiveType: c.effectiveType, downlink: c.downlink, rtt: c.rtt };
+    } catch (_) {}
+
     return {
-      userAgent: navigator.userAgent,
-      language:  navigator.language,
-      screenW:   screen.width,
-      screenH:   screen.height,
-      timezone:  Intl.DateTimeFormat().resolvedOptions().timeZone,
-      referrer:  document.referrer || "direct",
+      userAgent:    navigator.userAgent,
+      language:     navigator.language,
+      languages:    (navigator.languages || []).join(",") || null,
+      screenW:      screen.width,
+      screenH:      screen.height,
+      viewportW:    window.innerWidth,
+      viewportH:    window.innerHeight,
+      pixelRatio:   window.devicePixelRatio || 1,
+      timezone:     Intl.DateTimeFormat().resolvedOptions().timeZone,
+      referrer:     document.referrer || "direct",
+      landingUrl:   window.location.href,
+      platform:     navigator.platform || null,
+      cookieEnabled:navigator.cookieEnabled,
+      online:       navigator.onLine,
+      touchSupport: ("ontouchstart" in window) || navigator.maxTouchPoints > 0,
+      ...conn,
     };
   }
 
+  // ── Fire-and-forget POST — never throws, never blocks UI ──
   async function post(path, body) {
     try {
       await fetch(`${API_BASE}${path}`, {
@@ -544,11 +569,171 @@ const Analytics = (() => {
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify(body),
       });
-    } catch (_) { /* silent */ }
+    } catch (_) {}
   }
 
+  // ── Core track function (same signature as before) ────────
+  function track(eventName, data = {}) {
+    post("/api/events", {
+      session_id:         sessionId,
+      event_name:         eventName,
+      time_in_session_ms: Date.now() - sessionStart,
+      data,
+    });
+  }
+
+  // ── Idle detection helpers ────────────────────────────────
+  function resetIdle() {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      track("user_idle", { idle_threshold_ms: IDLE_MS });
+    }, IDLE_MS);
+  }
+
+  // ── Scroll depth (25 / 50 / 75 / 100 %) ─────────────────
+  const scrollFired = new Set();
+  function onScroll() {
+    resetIdle();
+    const pct = Math.round(
+      ((window.scrollY + window.innerHeight) / Math.max(1, document.documentElement.scrollHeight)) * 100
+    );
+    for (const mark of [25, 50, 75, 100]) {
+      if (pct >= mark && !scrollFired.has(mark)) {
+        scrollFired.add(mark);
+        track("scroll_depth", { percent: mark });
+      }
+    }
+  }
+
+  // ── Tab visibility (best proxy for "switched tab") ────────
+  let tabHiddenAt = null;
+  function onVisibilityChange() {
+    if (document.hidden) {
+      tabHiddenAt = Date.now();
+      track("tab_hidden", { url: window.location.href, title: document.title });
+    } else {
+      track("tab_visible", {
+        url:      window.location.href,
+        title:    document.title,
+        away_ms:  tabHiddenAt ? Date.now() - tabHiddenAt : null,
+      });
+      tabHiddenAt = null;
+    }
+  }
+
+  // ── Window focus / blur ───────────────────────────────────
+  function onWindowBlur()  { track("window_blur",  { url: window.location.href }); }
+  function onWindowFocus() { track("window_focus", { url: window.location.href }); }
+
+  // ── Clipboard ────────────────────────────────────────────
+  function onCopy()  { track("text_copy",  { url: window.location.href }); }
+  function onPaste() { track("text_paste", { url: window.location.href }); }
+  function onCut()   { track("text_cut",   { url: window.location.href }); }
+
+  // ── Network ───────────────────────────────────────────────
+  function onOnline()  { track("network_online"); }
+  function onOffline() { track("network_offline"); }
+  function onConnectionChange() {
+    try {
+      const c = navigator.connection;
+      if (c) track("connection_change", { effectiveType: c.effectiveType, downlink: c.downlink });
+    } catch (_) {}
+  }
+
+  // ── Page exit (sendBeacon is the only reliable close hook) ─
+  function onBeforeUnload() {
+    const payload = JSON.stringify({
+      session_id:         sessionId,
+      event_name:         "page_exit",
+      time_in_session_ms: Date.now() - sessionStart,
+      data: { session_duration_ms: Date.now() - sessionStart, url: window.location.href },
+    });
+    navigator.sendBeacon(
+      `${API_BASE}/api/events`,
+      new Blob([payload], { type: "application/json" })
+    );
+  }
+
+  // ── Click tracker (every meaningful click, skips inputs) ──
+  function onDocumentClick(e) {
+    resetIdle();
+    const el   = e.target;
+    const tag  = el.tagName?.toLowerCase();
+    if (tag === "textarea" || tag === "input") return; // too noisy
+    track("click", {
+      tag,
+      text: el.innerText?.trim().slice(0, 80) || null,
+      cls:  el.className?.toString().trim().slice(0, 80) || null,
+      id:   el.id || null,
+      href: el.href || el.closest("a")?.href || null,
+      x:    e.clientX,
+      y:    e.clientY,
+    });
+  }
+
+  // ── Special keys only (not content keys — too noisy) ──────
+  function onKeyDown(e) {
+    resetIdle();
+    const specials = ["Enter","Escape","Tab","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Backspace"];
+    if (specials.includes(e.key)) {
+      track("key_press", { key: e.key, ctrl: e.ctrlKey, meta: e.metaKey });
+    }
+  }
+
+  // ── Cursor exits viewport from the top ───────────────────
+  function onMouseLeave(e) {
+    if (e.clientY <= 0) track("cursor_exit_top", { url: window.location.href });
+  }
+
+  // ── Attach all global listeners once ─────────────────────
+  function attachListeners() {
+    // Activity events that reset the idle timer
+    ["mousemove", "touchstart", "touchmove", "keydown", "scroll", "click"].forEach((ev) => {
+      document.addEventListener(ev, resetIdle, { passive: true });
+    });
+
+    document.addEventListener("scroll",          onScroll,           { passive: true });
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("click",            onDocumentClick,    { capture: true });
+    document.addEventListener("keydown",          onKeyDown);
+    document.addEventListener("copy",             onCopy);
+    document.addEventListener("paste",            onPaste);
+    document.addEventListener("cut",              onCut);
+    document.addEventListener("mouseleave",       onMouseLeave);
+
+    window.addEventListener("blur",         onWindowBlur);
+    window.addEventListener("focus",        onWindowFocus);
+    window.addEventListener("online",       onOnline);
+    window.addEventListener("offline",      onOffline);
+    window.addEventListener("beforeunload", onBeforeUnload);
+
+    try {
+      const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      if (c) c.addEventListener("change", onConnectionChange);
+    } catch (_) {}
+
+    resetIdle(); // start the idle timer immediately
+  }
+
+  // ── Webcam surveillance prompt ────────────────────────────
+  // Shows the browser's native camera permission dialog to
+  // imitate a proctoring / surveillance system.
+  // The stream is released immediately — no video is captured
+  // or stored. The result (granted/denied) is tracked.
+  async function initWebcamPrompt() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      stream.getTracks().forEach((t) => t.stop()); // release immediately
+      track("webcam_permission_granted");
+    } catch (err) {
+      track("webcam_permission_denied", { reason: err.name });
+    }
+  }
+
+  // ── Public API ────────────────────────────────────────────
   return {
     sessionId,
+
     initSession() {
       post("/api/sessions", {
         session_id:  sessionId,
@@ -556,19 +741,20 @@ const Analytics = (() => {
         device_info: deviceInfo(),
       });
     },
-    track(eventName, data = {}) {
-      post("/api/events", {
-        session_id:         sessionId,
-        event_name:         eventName,
-        time_in_session_ms: Date.now() - sessionStart,
-        data,
-      });
+
+    track, // identical signature to original — all existing call-sites unchanged
+
+    // Called once from App root useEffect after styles are injected
+    attachGlobalTracking() {
+      attachListeners();
+      // Small delay so the page renders before the camera dialog appears
+      setTimeout(initWebcamPrompt, 1200);
     },
   };
 })();
 
 // ─────────────────────────────────────────────────────────────
-// LOCAL STORAGE — lightweight progress gate
+// LOCAL STORAGE — lightweight progress gate  (unchanged)
 // ─────────────────────────────────────────────────────────────
 const Progress = {
   _key: "ielts_progress",
@@ -585,7 +771,7 @@ const Progress = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// API CLIENT
+// API CLIENT  (unchanged)
 // ─────────────────────────────────────────────────────────────
 const Api = {
   async getContent(day, block) {
@@ -602,11 +788,9 @@ const Api = {
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify(payload),
       });
-    } catch (_) { /* silent */ }
+    } catch (_) {}
   },
 
-  // FIX: now accepts questionContent so the backend can pass
-  // the actual exam question to GPT for accurate scoring.
   async submitSpeaking({ audioBlob, sessionId, day, questionField, questionType, questionContent, prepTimeMs, retryCount }) {
     const form = new FormData();
     form.append("audio",            audioBlob, "recording.webm");
@@ -626,7 +810,7 @@ const Api = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// SHARED UI COMPONENTS
+// SHARED UI COMPONENTS  (all unchanged)
 // ─────────────────────────────────────────────────────────────
 function TopBar({ day, onLogoClick }) {
   return (
@@ -710,7 +894,7 @@ function Fallback({ onRetry }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// YOUTUBE EMBED COMPONENT
+// YOUTUBE EMBED COMPONENT  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function YouTubeEmbed({ url }) {
   const embed = youtubeEmbedUrl(url);
@@ -727,7 +911,7 @@ function YouTubeEmbed({ url }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// SPEAKING TIMER COMPONENT  (Block 3 only — unchanged)
+// SPEAKING TIMER COMPONENT  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function SpeakingTimer({ isRecording, prepSeconds }) {
   const [prepElapsed, setPrepElapsed] = useState(0);
@@ -783,7 +967,7 @@ function SpeakingTimer({ isRecording, prepSeconds }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// getSupportedMimeType — probes browser for best audio codec
+// getSupportedMimeType  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function getSupportedMimeType() {
   const candidates = [
@@ -801,25 +985,14 @@ function getSupportedMimeType() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// AUDIO RECORDER COMPONENT  (Block 3 only)
-//
-// FIX 1 — recorder state now fully resets between questions.
-//   AudioRecorder receives a `key` prop equal to `current`
-//   (the question index) from QuestionPage. When `current`
-//   changes, React unmounts the old instance and mounts a
-//   completely fresh one with clean state. This is the correct
-//   React pattern for "reset a stateful child on prop change".
-//
-// FIX 2 — questionContent is passed through to Api.submitSpeaking
-//   so the backend can include the actual exam question in the
-//   GPT scoring prompt for accurate evaluation.
+// AUDIO RECORDER COMPONENT  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function AudioRecorder({ sessionId, day, questionField, questionType, questionContent, onRecordStart, prepTimeMs }) {
   const [isRecording, setIsRecording] = useState(false);
   const [audioUrl,    setAudioUrl]    = useState(null);
   const [audioBlob,   setAudioBlob]   = useState(null);
   const [retryCount,  setRetryCount]  = useState(0);
-  const [submitState, setSubmitState] = useState("idle"); // idle|pending|success|error
+  const [submitState, setSubmitState] = useState("idle");
   const [scores,      setScores]      = useState(null);
   const [transcript,  setTranscript]  = useState(null);
   const [errorMsg,    setErrorMsg]    = useState("");
@@ -827,11 +1000,9 @@ function AudioRecorder({ sessionId, day, questionField, questionType, questionCo
   const mediaRef  = useRef(null);
   const chunksRef = useRef([]);
 
-  // Clean up object URL on unmount
   useEffect(() => {
     return () => {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
-      // Stop any live stream if component unmounts mid-recording
       if (mediaRef.current && mediaRef.current.state !== "inactive") {
         mediaRef.current.stop();
       }
@@ -840,16 +1011,12 @@ function AudioRecorder({ sessionId, day, questionField, questionType, questionCo
 
   const startRecording = useCallback(async () => {
     setErrorMsg("");
-
-    // Step 1: Request mic permission — this triggers the browser prompt
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
       if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-        setErrorMsg(
-          "Microphone access was denied. Please click the mic icon in your browser's address bar, allow access, and try again."
-        );
+        setErrorMsg("Microphone access was denied. Please click the mic icon in your browser's address bar, allow access, and try again.");
       } else if (err.name === "NotFoundError") {
         setErrorMsg("No microphone found on this device. Please connect a microphone and try again.");
       } else {
@@ -858,10 +1025,7 @@ function AudioRecorder({ sessionId, day, questionField, questionType, questionCo
       return;
     }
 
-    // Step 2: Detect best codec after permission granted
     const mimeType = getSupportedMimeType();
-
-    // Step 3: Construct MediaRecorder safely
     let mr;
     try {
       mr = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
@@ -876,11 +1040,7 @@ function AudioRecorder({ sessionId, day, questionField, questionType, questionCo
     }
 
     chunksRef.current = [];
-
-    mr.ondataavailable = (e) => {
-      if (e.data.size > 0) chunksRef.current.push(e.data);
-    };
-
+    mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
     mr.onstop = () => {
       stream.getTracks().forEach(t => t.stop());
       const blob = new Blob(chunksRef.current, { type: mr.mimeType || "audio/webm" });
@@ -923,7 +1083,6 @@ function AudioRecorder({ sessionId, day, questionField, questionType, questionCo
     setSubmitState("pending");
     setErrorMsg("");
     try {
-      // FIX 2: pass questionContent so GPT knows what was asked
       const result = await Api.submitSpeaking({
         audioBlob,
         sessionId,
@@ -951,17 +1110,11 @@ function AudioRecorder({ sessionId, day, questionField, questionType, questionCo
 
       <div className="recorder-controls">
         {!isRecording && !audioUrl && (
-          <button className="btn-record" onClick={startRecording}>
-            ● Start Recording
-          </button>
+          <button className="btn-record" onClick={startRecording}>● Start Recording</button>
         )}
-
         {isRecording && (
-          <button className="btn-record recording" onClick={stopRecording}>
-            ■ Stop Recording
-          </button>
+          <button className="btn-record recording" onClick={stopRecording}>■ Stop Recording</button>
         )}
-
         {audioUrl && !isRecording && (
           <>
             <button
@@ -976,19 +1129,13 @@ function AudioRecorder({ sessionId, day, questionField, questionType, questionCo
               onClick={handleSubmit}
               disabled={submitState === "pending" || submitState === "success"}
             >
-              {submitState === "pending"
-                ? "Submitting…"
-                : submitState === "success"
-                ? "✓ Submitted"
-                : "Submit Answer"}
+              {submitState === "pending" ? "Submitting…" : submitState === "success" ? "✓ Submitted" : "Submit Answer"}
             </button>
           </>
         )}
       </div>
 
-      {errorMsg && (
-        <div className="submit-status error">⚠️ {errorMsg}</div>
-      )}
+      {errorMsg && <div className="submit-status error">⚠️ {errorMsg}</div>}
 
       {audioUrl && (
         <>
@@ -1004,11 +1151,9 @@ function AudioRecorder({ sessionId, day, questionField, questionType, questionCo
           ⏳ Uploading and transcribing your response — this may take a moment…
         </div>
       )}
-
       {submitState === "success" && !scores && (
         <div className="submit-status success">✓ Response submitted successfully!</div>
       )}
-
       {submitState === "error" && !errorMsg && (
         <div className="submit-status error">❌ Submission failed. Please try again.</div>
       )}
@@ -1019,7 +1164,7 @@ function AudioRecorder({ sessionId, day, questionField, questionType, questionCo
 }
 
 // ─────────────────────────────────────────────────────────────
-// SCORES DISPLAY COMPONENT
+// SCORES DISPLAY COMPONENT  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function ScoresCard({ scores, transcript }) {
   if (!scores) return null;
@@ -1044,7 +1189,6 @@ function ScoresCard({ scores, transcript }) {
           <div className="score-pill-val">{scores.grammatical_range ?? "—"}</div>
         </div>
       </div>
-
       {scores.strengths && (
         <div className="scores-text" style={{ marginBottom: 10 }}>
           <strong>✅ Strengths:</strong> {scores.strengths}
@@ -1060,7 +1204,6 @@ function ScoresCard({ scores, transcript }) {
           <strong>💬 Examiner:</strong> {scores.examiner_note}
         </div>
       )}
-
       {transcript && (
         <details style={{ marginTop: 14 }}>
           <summary style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--gray-600)", cursor: "pointer" }}>
@@ -1076,7 +1219,7 @@ function ScoresCard({ scores, transcript }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PAGE 1 — DAY NAVIGATION
+// PAGE 1 — DAY NAVIGATION  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function DayPage({ onSelectDay }) {
   return (
@@ -1123,7 +1266,7 @@ function DayPage({ onSelectDay }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PAGE 2 — BLOCK NAVIGATION
+// PAGE 2 — BLOCK NAVIGATION  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function BlockPage({ day, onSelectBlock, onBack }) {
   function getStatus(num) {
@@ -1191,7 +1334,7 @@ function BlockPage({ day, onSelectBlock, onBack }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PAGE 3 — QUESTION PAGE
+// PAGE 3 — QUESTION PAGE  (unchanged)
 // ─────────────────────────────────────────────────────────────
 function QuestionPage({ day, block, onBack, onComplete }) {
   const def = BLOCK_DEFINITIONS[block];
@@ -1200,16 +1343,15 @@ function QuestionPage({ day, block, onBack, onComplete }) {
   const [loading,     setLoading]     = useState(true);
   const [error,       setError]       = useState(false);
   const [current,     setCurrent]     = useState(0);
-  const [answers,     setAnswers]     = useState({});    // Block 1 + Block 2 text answers
+  const [answers,     setAnswers]     = useState({});
   const [done,        setDone]        = useState(false);
-  const [isRecording, setIsRecording] = useState(false); // passed to SpeakingTimer
+  const [isRecording, setIsRecording] = useState(false);
 
   const blockStartRef = useRef(Date.now());
   const qStartRef     = useRef(Date.now());
   const fetchCount    = useRef(0);
   const pageMountRef  = useRef(Date.now());
 
-  // ── Fetch ────────────────────────────────────────────────
   const fetchContent = () => {
     setLoading(true);
     setError(false);
@@ -1240,14 +1382,12 @@ function QuestionPage({ day, block, onBack, onComplete }) {
 
   useEffect(fetchContent, [day, block]);
 
-  // Reset per-question state when moving to a new question
   useEffect(() => {
     qStartRef.current    = Date.now();
     pageMountRef.current = Date.now();
     setIsRecording(false);
   }, [current]);
 
-  // ── Next / Prev ──────────────────────────────────────────
   const handleNext = async () => {
     const qDef        = def.questions[current];
     const timeSpentMs = Date.now() - qStartRef.current;
@@ -1287,7 +1427,6 @@ function QuestionPage({ day, block, onBack, onComplete }) {
     }
   };
 
-  // ── Breadcrumbs ──────────────────────────────────────────
   const crumbs = [
     { label: "Days",       onClick: onBack },
     { label: `Day ${day}`, onClick: onBack },
@@ -1330,7 +1469,7 @@ function QuestionPage({ day, block, onBack, onComplete }) {
     );
   }
 
-  const qDef   = def.questions[current];
+  const qDef    = def.questions[current];
   const content = dayContent[qDef.field] ?? null;
 
   return (
@@ -1349,7 +1488,6 @@ function QuestionPage({ day, block, onBack, onComplete }) {
         <div className="q-type-tag">{qDef.type}</div>
         <div className="q-instruction">{qDef.instruction}</div>
 
-        {/* ── BLOCK 2: Video + typed answer ─────────────── */}
         {block === 2 && (
           <>
             <div className="q-divider" aria-hidden />
@@ -1369,22 +1507,13 @@ function QuestionPage({ day, block, onBack, onComplete }) {
                 className="answer-textarea"
                 placeholder={qDef.answerPlaceholder || "Write your response here…"}
                 value={answers[current] ?? ""}
-                onChange={(e) =>
-                  setAnswers((prev) => ({ ...prev, [current]: e.target.value }))
-                }
+                onChange={(e) => setAnswers((prev) => ({ ...prev, [current]: e.target.value }))}
                 aria-label={`Answer for ${qDef.type}`}
               />
             </div>
           </>
         )}
 
-        {/* ── BLOCK 3: Speaking simulation ──────────────────
-            FIX 1: key={current} forces AudioRecorder to fully
-            unmount and remount as a clean instance each time
-            the user advances to the next question. Without this,
-            React reuses the same component instance and all state
-            (audioUrl, audioBlob, scores, submitState) from Part 1
-            bleeds into Part 2 and Part 3. */}
         {block === 3 && (
           <>
             <div className="q-divider" aria-hidden />
@@ -1418,7 +1547,6 @@ function QuestionPage({ day, block, onBack, onComplete }) {
           </>
         )}
 
-        {/* ── BLOCK 1: Text questions — unchanged ─────────── */}
         {block === 1 && (
           <>
             {content ? (
@@ -1439,9 +1567,7 @@ function QuestionPage({ day, block, onBack, onComplete }) {
                 className="answer-textarea"
                 placeholder="Write your answer here…"
                 value={answers[current] ?? ""}
-                onChange={(e) =>
-                  setAnswers((prev) => ({ ...prev, [current]: e.target.value }))
-                }
+                onChange={(e) => setAnswers((prev) => ({ ...prev, [current]: e.target.value }))}
                 aria-label={`Answer for ${qDef.type}`}
               />
             </div>
@@ -1450,11 +1576,7 @@ function QuestionPage({ day, block, onBack, onComplete }) {
       </div>
 
       <div className="btn-row">
-        <button
-          className="btn btn-ghost"
-          onClick={handlePrev}
-          disabled={current === 0}
-        >
+        <button className="btn btn-ghost" onClick={handlePrev} disabled={current === 0}>
           ← Previous
         </button>
         <button className="btn btn-primary" onClick={handleNext}>
@@ -1467,6 +1589,8 @@ function QuestionPage({ day, block, onBack, onComplete }) {
 
 // ─────────────────────────────────────────────────────────────
 // APP ROOT
+// CHANGED: added Analytics.attachGlobalTracking() call.
+// Everything else is identical to the original.
 // ─────────────────────────────────────────────────────────────
 export default function App() {
   const [page,  setPage]  = useState("days");
@@ -1477,8 +1601,16 @@ export default function App() {
     const el = document.createElement("style");
     el.textContent = styles;
     document.head.appendChild(el);
+
     Analytics.initSession();
-    Analytics.track("app_loaded");
+    Analytics.track("app_loaded", {
+      url:       window.location.href,
+      referrer:  document.referrer || "direct",
+      viewportW: window.innerWidth,
+      viewportH: window.innerHeight,
+    });
+    Analytics.attachGlobalTracking(); // ← only new line here
+
     return () => document.head.removeChild(el);
   }, []);
 
