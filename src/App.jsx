@@ -1234,7 +1234,7 @@ function DayPage({ onSelectDay }) {
 
       <div className="day-grid">
         {Array.from({ length: 30 }, (_, i) => i + 1).map((day) => {
-          const isAvailable = day === 1;
+          const isAvailable = day === 1 || [1, 2, 3].every((b) => Progress.isDone(day - 1, b));
           const isDone      = [1, 2, 3].every((b) => Progress.isDone(day, b));
           return (
             <div
